@@ -1,0 +1,50 @@
+{% load static %}
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>{% block title %}Football Tracking{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'css/app.css' %}">
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <div class="ambient ambient-one"></div>
+  <div class="ambient ambient-two"></div>
+  <header class="site-header">
+    <a class="brand" href="{% url 'dashboard' %}" aria-label="Football Tracking — accueil">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 36 36" role="img"><path d="M6 26V10l12-6 12 6v16l-12 6-12-6Z"/><path d="m12 13 6-3 6 3v8l-6 3-6-3v-8Z"/><path d="M18 10V4M24 13l6-3M24 21l6 5M18 24v8M12 21l-6 5M12 13l-6-3"/></svg>
+      </span>
+      <span>
+        <strong>Football Tracking</strong>
+        <small>Match Intelligence Lab</small>
+      </span>
+    </a>
+    <nav class="top-nav" aria-label="Navigation principale">
+      <a href="{% url 'dashboard' %}">Matches</a>
+      <a href="{% url 'match-upload' %}" class="button button-small button-primary">Importer un match</a>
+      <span class="local-chip"><i></i> Local</span>
+    </nav>
+  </header>
+
+  <main class="page-shell">
+    {% if messages %}
+      <div class="message-stack" aria-live="polite">
+        {% for message in messages %}
+          <div class="message message-{{ message.tags|default:'info' }}">{{ message }}</div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="site-footer">
+    <span>Football Tracking</span>
+    <span>Vos vidéos et données restent sur votre machine.</span>
+  </footer>
+  <script src="{% static 'js/app.js' %}" defer></script>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

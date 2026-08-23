@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% load match_extras %}
+{% block title %}Tableau de bord · Football Tracking{% endblock %}
+
+{% block content %}
+  <section class="hero dashboard-hero">
+    <div>
+      <p class="eyebrow">Analyse vidéo locale assistée par IA</p>
+      <h1>Transformez un match en<br><span>données exploitables.</span></h1>
+      <p class="hero-copy">Découpage des mi-temps, temps effectif, tracking caméra, possession, actions et rapports individuels dans un seul laboratoire.</p>
+      <div class="hero-actions">
+        <a href="{% url 'match-upload' %}" class="button button-primary button-large">Importer une vidéo <span>↗</span></a>
+        <a href="#matches" class="button button-ghost button-large">Voir les analyses</a>
+      </div>
+    </div>
+    <div class="pitch-visual" aria-hidden="true">
+      <div class="pitch-lines">
+        <span class="pitch-circle"></span>
+        <span class="player-dot home p1"></span><span class="player-dot home p2"></span>
+        <span class="player-dot home p3"></span><span class="player-dot home p4"></span>
+        <span class="player-dot away p5"></span><span class="player-dot away p6"></span>
+        <span class="player-dot away p7"></span><span class="ball-dot"></span>
+        <svg class="tracking-path" viewBox="0 0 600 340"><path d="M117 249 C185 235, 214 143, 300 167 S424 124, 490 74"/></svg>
+      </div>
+      <div class="floating-insight insight-a"><small>Possession</small><strong>56.4%</strong><span>+4.2 vs moyenne</span></div>
+      <div class="floating-insight insight-b"><small>Ball in play</small><strong>58:21</strong><span class="live-dot">Calcul actif</span></div>
+    </div>
+  </section>
+
+  <section class="metric-grid" aria-label="Résumé">
+    <article class="metric-card"><span class="metric-icon">◫</span><div><small>Matches</small><strong>{{ summary.matches }}</strong></div></article>
+    <article class="metric-card"><span class="metric-icon">◎</span><div><small>En analyse</small><strong>{{ summary.processing }}</strong></div></article>
+    <article class="metric-card"><span class="metric-icon">◇</span><div><small>À valider</small><strong>{{ summary.review }}</strong></div></article>
+    <article class="metric-card"><span class="metric-icon">↗</span><div><small>Actions détectées</small><strong>{{ summary.events }}</strong></div></article>
+  </section>
+
+  <section id="matches" class="section-block">
+    <div class="section-heading">
+      <div><p class="eyebrow">Bibliothèque locale</p><h2>Vos matches</h2></div>
+      <a class="text-link" href="{% url 'match-upload' %}">Nouvelle analyse <span>＋</span></a>
+    </div>
+    {% if matches %}
+      <div class="match-list">
+        {% for match in matches %}
+          <a class="match-row" href="{{ match.get_absolute_url }}">
+            <div class="match-date"><strong>{{ match.created_at|date:"d" }}</strong><span>{{ match.created_at|date:"M" }}</span></div>
+            <div class="match-main">
+              <span class="competition">{{ match.competition|default:"Match amical" }}</span>
+              <div class="match-teams">
+                <span class="team-swatch" style="--swatch: {{ match.home_team.primary_color }}"></span>
+                <strong>{{ match.home_team.name }}</strong>
+                <b>{{ match.home_score }}–{{ match.away_score }}</b>
+                <strong>{{ match.away_team.name }}</strong>
+                <span class="team-swatch" style="--swatch: {{ match.away_team.primary_color }}"></span>
+              </div>
+              <small>{{ match.venue|default:"Lieu non renseigné" }}</small>
+            </div>
+            <div class="match-meta"><span class="status status-{{ match.status|status_class }}">{{ match.get_status_display }}</span><span>{{ match.event_count }} actions</span><span class="row-arrow">→</span></div>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty-state">
+        <span class="empty-icon">⌁</span>
+        <h3>Votre premier match commence ici</h3>
+        <p>Importez une vidéo complète, même si elle contient l’avant-match et la mi-temps.</p>
+        <a href="{% url 'match-upload' %}" class="button button-primary">Choisir une vidéo</a>
+      </div>
+    {% endif %}
+  </section>
+
+  <section class="workflow-strip">
+    <div><span>01</span><strong>Vidéo</strong><small>Contrôle qualité</small></div>
+    <i></i><div><span>02</span><strong>Terrain</strong><small>Caméra & tracking</small></div>
+    <i></i><div><span>03</span><strong>Actions</strong><small>Découpage temporel</small></div>
+    <i></i><div><span>04</span><strong>Rapport</strong><small>Équipe & joueurs</small></div>
+  </section>
+{% endblock %}

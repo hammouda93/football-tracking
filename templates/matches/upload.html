@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Importer un match · Football Tracking{% endblock %}
+
+{% block content %}
+  <div class="breadcrumb"><a href="{% url 'dashboard' %}">Matches</a><span>›</span><strong>Nouvelle analyse</strong></div>
+  <section class="upload-layout">
+    <div class="upload-intro">
+      <p class="eyebrow">Nouveau projet</p>
+      <h1>Importez le match<br><span>dans son intégralité.</span></h1>
+      <p>La vidéo peut commencer avant l’entrée des équipes. L’analyse cherchera les deux mi-temps et conservera séparément le temps vidéo et le temps de match.</p>
+      <div class="requirement-list">
+        <div><span>01</span><p><strong>Angle recommandé</strong><small>Caméra haute et large, ligne médiane visible régulièrement.</small></p></div>
+        <div><span>02</span><p><strong>Qualité utile</strong><small>1080p idéal, 720p minimum, 25 images/s ou plus.</small></p></div>
+        <div><span>03</span><p><strong>Fichier local</strong><small>MP4, MOV, MKV, AVI ou M4V. Aucune mise en ligne externe.</small></p></div>
+      </div>
+    </div>
+    <form method="post" enctype="multipart/form-data" class="panel upload-form">
+      {% csrf_token %}
+      {% if form.non_field_errors %}<div class="form-errors">{{ form.non_field_errors }}</div>{% endif %}
+      <div class="form-section-heading"><span>1</span><div><strong>La vidéo</strong><small>Source originale du match</small></div></div>
+      <label class="drop-zone" for="{{ form.video.id_for_label }}">
+        {{ form.video }}
+        <span class="drop-icon">⇧</span>
+        <strong>Déposez votre vidéo ici</strong>
+        <small>ou cliquez pour parcourir votre ordinateur</small>
+        <em data-file-name>MP4, MOV, MKV, AVI · taille selon votre disque</em>
+      </label>
+      {% if form.video.errors %}<div class="field-errors">{{ form.video.errors }}</div>{% endif %}
+
+      <div class="form-section-heading"><span>2</span><div><strong>Les équipes</strong><small>Noms et couleurs de maillot</small></div></div>
+      <div class="form-grid two-columns">
+        <div class="field"><label for="{{ form.home_team_name.id_for_label }}">{{ form.home_team_name.label }}</label>{{ form.home_team_name }}{{ form.home_team_name.errors }}</div>
+        <div class="field color-field"><label for="{{ form.home_team_color.id_for_label }}">{{ form.home_team_color.label }}</label>{{ form.home_team_color }}{{ form.home_team_color.errors }}</div>
+        <div class="field"><label for="{{ form.away_team_name.id_for_label }}">{{ form.away_team_name.label }}</label>{{ form.away_team_name }}{{ form.away_team_name.errors }}</div>
+        <div class="field color-field"><label for="{{ form.away_team_color.id_for_label }}">{{ form.away_team_color.label }}</label>{{ form.away_team_color }}{{ form.away_team_color.errors }}</div>
+      </div>
+
+      <div class="form-section-heading"><span>3</span><div><strong>Le contexte</strong><small>Facultatif mais utile dans les exports</small></div></div>
+      <div class="form-grid two-columns">
+        <div class="field"><label for="{{ form.competition.id_for_label }}">{{ form.competition.label }}</label>{{ form.competition }}</div>
+        <div class="field"><label for="{{ form.venue.id_for_label }}">{{ form.venue.label }}</label>{{ form.venue }}</div>
+      </div>
+      <div class="form-actions">
+        <a href="{% url 'dashboard' %}" class="button button-ghost">Annuler</a>
+        <button class="button button-primary button-large" type="submit">Créer le laboratoire <span>→</span></button>
+      </div>
+    </form>
+  </section>
+{% endblock %}

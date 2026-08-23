@@ -1,0 +1,153 @@
+{% extends "base.html" %}
+{% load match_extras %}
+{% block title %}{{ match }} · Football Tracking{% endblock %}
+
+{% block content %}
+  <div class="breadcrumb"><a href="{% url 'dashboard' %}">Matches</a><span>›</span><strong>{{ match.home_team.short_name }}–{{ match.away_team.short_name }}</strong></div>
+
+  <section class="match-header">
+    <div>
+      <div class="match-kicker"><span class="status status-{{ match.status|status_class }}">{{ match.get_status_display }}</span><span>{{ match.competition|default:"Match amical" }}</span><span>{{ match.created_at|date:"d/m/Y" }}</span></div>
+      <div class="scoreboard">
+        <div class="score-team"><span class="crest" style="--team: {{ match.home_team.primary_color }}">{{ match.home_team.short_name|slice:":1" }}</span><h1>{{ match.home_team.name }}</h1></div>
+        <div class="score"><strong>{{ match.home_score }} <i>–</i> {{ match.away_score }}</strong><small>{{ match.venue|default:"Lieu non renseigné" }}</small></div>
+        <div class="score-team away"><h1>{{ match.away_team.name }}</h1><span class="crest" style="--team: {{ match.away_team.primary_color }}">{{ match.away_team.short_name|slice:":1" }}</span></div>
+      </div>
+    </div>
+    <div class="header-actions">
+      {% if match.video %}
+        <form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" type="submit">{% if latest_run %}Relancer l’analyse{% else %}Lancer l’analyse{% endif %} <span>▶</span></button></form>
+      {% endif %}
+      <a class="button button-ghost" href="{% url 'match-export-report' match.pk %}">Rapport JSON</a>
+      <a class="button button-ghost" href="{% url 'match-export-events' match.pk %}">Événements CSV</a>
+    </div>
+  </section>
+
+  <nav class="workspace-tabs" aria-label="Espaces du match">
+    <a href="#lab">Laboratoire</a><a href="#stats">Statistiques</a><a href="#events">Actions</a><a href="#identity">Identités <span>{{ unassigned_track_count }}</span></a><a href="#rosters">Effectifs</a>
+  </nav>
+
+  {% if latest_run %}
+    <section class="analysis-banner status-{{ latest_run.status|status_class }}" data-analysis-status="{% url 'analysis-status' latest_run.pk %}" data-terminal="{% if latest_run.status == 'completed' or latest_run.status == 'review' or latest_run.status == 'failed' or latest_run.status == 'cancelled' %}true{% else %}false{% endif %}">
+      <div class="analysis-orb"><span></span></div>
+      <div class="analysis-copy"><small>Dernière analyse · {{ latest_run.created_at|date:"d/m H:i" }}</small><strong data-stage-label>{{ latest_run.get_current_stage_display }}</strong><div class="progress-track"><i data-progress-bar style="width: {{ latest_run.progress }}%"></i></div></div>
+      <div class="analysis-value"><strong data-progress-value>{{ latest_run.progress }}%</strong><span data-status-label>{{ latest_run.get_status_display }}</span></div>
+      {% if latest_run.status == 'queued' or latest_run.status == 'processing' %}<form method="post" action="{% url 'analysis-cancel' latest_run.pk %}">{% csrf_token %}<button class="button button-danger button-small">Arrêter</button></form>{% endif %}
+      {% if latest_run.error_message %}<p class="analysis-error" data-analysis-error>{{ latest_run.error_message }}</p>{% endif %}
+    </section>
+  {% endif %}
+
+  <section id="lab" class="workspace-grid">
+    <article class="panel video-panel">
+      <div class="panel-heading"><div><p class="eyebrow">Source</p><h2>Vidéo du match</h2></div>{% if match.video %}<span>{{ match.video.width }}×{{ match.video.height }} · {{ match.video.fps|floatformat:1 }} fps</span>{% endif %}</div>
+      {% if match.video %}
+        <div class="video-shell"><video id="match-video" controls preload="metadata" src="{{ match.video.file.url }}"></video><div class="video-watermark">FT / LOCAL</div></div>
+      {% else %}
+        <div class="video-placeholder"><span>◫</span><p>Match de démonstration — aucune vidéo source.</p></div>
+      {% endif %}
+      <div class="video-legend"><span><i class="green"></i> Jeu détecté</span><span><i class="orange"></i> Coupure / replay</span><span><i class="gray"></i> Hors période</span></div>
+    </article>
+
+    <aside class="lab-side">
+      <article class="panel quality-card">
+        <div class="panel-heading"><div><p class="eyebrow">Diagnostic</p><h2>Qualité vidéo</h2></div>{% if match.video %}<span class="quality-grade grade-{{ match.video.quality_grade }}">{{ match.video.quality_grade|upper }}</span>{% endif %}</div>
+        {% if match.video %}
+          <div class="quality-score"><strong>{{ match.video.quality_score|floatformat:0 }}</strong><span>/100</span><i style="--score: {{ match.video.quality_score }}%"></i></div>
+          <dl class="quality-list"><div><dt>Netteté</dt><dd>{{ match.video.quality_metrics.sharpness|default:"—" }}</dd></div><div><dt>Présence terrain</dt><dd>{{ match.video.quality_metrics.field_presence|default:0|floatformat:2 }}</dd></div><div><dt>Codec</dt><dd>{{ match.video.codec|default:"—" }}</dd></div><div><dt>Durée vidéo</dt><dd>{{ match.video.duration_ms|timecode }}</dd></div></dl>
+        {% else %}<p class="muted">Disponible après import et analyse.</p>{% endif %}
+      </article>
+
+      <article class="panel period-card">
+        <div class="panel-heading"><div><p class="eyebrow">Double horloge</p><h2>Mi-temps</h2></div><span class="info-dot" title="Temps vidéo → temps de match">i</span></div>
+        {% if periods|length == 2 %}
+          <form method="post" action="{% url 'match-update-periods' match.pk %}">{% csrf_token %}
+            <div class="period-row"><span>1</span><div><strong>1re mi-temps</strong><small>Début vidéo</small><input name="p1_start" value="{{ periods.0.video_start_ms|timecode }}"><small>Fin vidéo</small><input name="p1_end" value="{{ periods.0.video_end_ms|timecode }}"></div><em class="confidence">{{ periods.0.confidence|percent }}</em></div>
+            <div class="halftime-marker"><i></i><span>Mi-temps exclue</span><i></i></div>
+            <div class="period-row"><span>2</span><div><strong>2e mi-temps</strong><small>Début vidéo</small><input name="p2_start" value="{{ periods.1.video_start_ms|timecode }}"><small>Fin vidéo</small><input name="p2_end" value="{{ periods.1.video_end_ms|timecode }}"></div><em class="confidence">{{ periods.1.confidence|percent }}</em></div>
+            <button class="button button-secondary full-width" type="submit">Confirmer les limites</button>
+          </form>
+        {% else %}<p class="muted">Lancez l’analyse pour obtenir une proposition automatique des deux mi-temps.</p>{% endif %}
+      </article>
+    </aside>
+  </section>
+
+  <section id="stats" class="section-block">
+    <div class="section-heading"><div><p class="eyebrow">Vue collective</p><h2>Comparaison des équipes</h2></div><span class="section-note">Calculée sur les séquences en jeu</span></div>
+    <div class="panel stats-comparison">
+      <div class="comparison-head"><span style="--team: {{ match.home_team.primary_color }}"><i></i>{{ match.home_team.name }}</span><strong>Indicateur</strong><span class="away" style="--team: {{ match.away_team.primary_color }}">{{ match.away_team.name }}<i></i></span></div>
+      {% with hm=home_stats.metrics am=away_stats.metrics %}
+        <div class="stat-row"><b>{{ hm|metric:'possession_pct'|percent }}</b><div><span>Possession</span><i class="dual-bar"><em style="width: {{ hm|metric:'possession_pct' }}%; background: {{ match.home_team.primary_color }}"></em><em style="width: {{ am|metric:'possession_pct' }}%; background: {{ match.away_team.primary_color }}"></em></i></div><b>{{ am|metric:'possession_pct'|percent }}</b></div>
+        <div class="stat-row"><b>{{ hm|metric:'passes'|number }}</b><div><span>Passes</span></div><b>{{ am|metric:'passes'|number }}</b></div>
+        <div class="stat-row"><b>{{ hm|metric:'pass_accuracy_pct'|percent }}</b><div><span>Précision des passes</span></div><b>{{ am|metric:'pass_accuracy_pct'|percent }}</b></div>
+        <div class="stat-row"><b>{{ hm|metric:'shots'|number }}</b><div><span>Tirs</span></div><b>{{ am|metric:'shots'|number }}</b></div>
+        <div class="stat-row"><b>{{ hm|metric:'duels'|number }}</b><div><span>Duels</span></div><b>{{ am|metric:'duels'|number }}</b></div>
+        <div class="stat-row"><b>{{ hm|metric:'recoveries'|number }}</b><div><span>Récupérations</span></div><b>{{ am|metric:'recoveries'|number }}</b></div>
+      {% endwith %}
+    </div>
+    {% if player_stats %}
+      <div class="player-stat-grid">
+        {% for stat in player_stats %}<article class="player-stat-card"><div><span class="mini-shirt" style="--team: {{ stat.player.team.primary_color }}">{{ stat.player.shirt_number|default:"?" }}</span><p><strong>{{ stat.player.name }}</strong><small>{{ stat.player.team.short_name }} · {{ stat.minutes_played|floatformat:1 }} min</small></p></div><dl><div><dt>Passes</dt><dd>{{ stat.metrics|metric:'passes'|number }}</dd></div><div><dt>Précision</dt><dd>{{ stat.metrics|metric:'pass_accuracy_pct'|percent }}</dd></div><div><dt>Duels</dt><dd>{{ stat.metrics|metric:'duels'|number }}</dd></div><div><dt>Tirs</dt><dd>{{ stat.metrics|metric:'shots'|number }}</dd></div></dl></article>{% endfor %}
+      </div>
+    {% endif %}
+  </section>
+
+  <section id="events" class="section-block">
+    <div class="section-heading"><div><p class="eyebrow">Timeline vérifiable</p><h2>Actions détectées</h2></div><div class="section-actions"><a class="button button-ghost button-small" href="{% url 'match-export-events' match.pk %}">Exporter CSV</a></div></div>
+    <form class="filter-bar" method="get" action="#events">
+      <select name="event_type"><option value="">Toutes les actions</option>{% for value,label in event_types %}<option value="{{ value }}" {% if request.GET.event_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      <select name="team"><option value="">Deux équipes</option><option value="{{ match.home_team_id }}" {% if request.GET.team == match.home_team_id|stringformat:'s' %}selected{% endif %}>{{ match.home_team.name }}</option><option value="{{ match.away_team_id }}" {% if request.GET.team == match.away_team_id|stringformat:'s' %}selected{% endif %}>{{ match.away_team.name }}</option></select>
+      <select name="review_status"><option value="">Tous les statuts</option>{% for value,label in review_statuses %}<option value="{{ value }}" {% if request.GET.review_status == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select>
+      <button class="button button-secondary button-small">Filtrer</button>
+    </form>
+    <div class="event-table-wrap panel">
+      <table class="event-table">
+        <thead><tr><th>Temps match</th><th>Action</th><th>Équipe</th><th>Joueur → destinataire</th><th>Résultat</th><th>Confiance</th><th>Validation</th></tr></thead>
+        <tbody>
+          {% for event in events %}
+            <tr>
+              <td><button class="timecode-button" data-video-ms="{{ event.video_time_ms }}" title="Lire à {{ event.video_time_ms|timecode }}">{{ event.match_time_ms|timecode }} <span>▶</span></button><small>vidéo {{ event.video_time_ms|timecode }}</small></td>
+              <td><span class="event-type event-{{ event.event_type }}">{{ event.get_event_type_display }}</span>{% if event.clip %}<a class="clip-link" href="{{ event.clip.url }}" target="_blank">clip ↗</a>{% endif %}</td>
+              <td>{% if event.team %}<span class="team-label"><i style="background: {{ event.team.primary_color }}"></i>{{ event.team.short_name }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+              <td><strong>{{ event.player.name|default:event.actor_track.track_uid|default:"Non identifié" }}</strong>{% if event.recipient or event.recipient_track %}<span class="recipient">→ {{ event.recipient.name|default:event.recipient_track.track_uid }}</span>{% endif %}</td>
+              <td><span class="outcome outcome-{{ event.outcome }}">{{ event.get_outcome_display }}</span></td>
+              <td><div class="confidence-cell"><span>{{ event.confidence|percent }}</span><i><em style="width: {{ event.confidence|percentage_width }}%"></em></i></div></td>
+              <td>
+                <div class="review-actions">
+                  <span class="status status-{{ event.review_status|status_class }}">{{ event.get_review_status_display }}</span>
+                  {% if event.review_status == 'pending' %}<form method="post" action="{% url 'event-review' event.pk %}">{% csrf_token %}<button name="action" value="accept" class="icon-button accept" title="Valider">✓</button><button name="action" value="reject" class="icon-button reject" title="Rejeter">×</button></form>{% endif %}
+                  <details class="correction"><summary title="Corriger">⋯</summary><form method="post" action="{% url 'event-review' event.pk %}" class="correction-popover">{% csrf_token %}<input type="hidden" name="action" value="correct"><label>Action<select name="event_type">{% for value,label in event_types %}<option value="{{ value }}" {% if event.event_type == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><label>Équipe<select name="team"><option value="">—</option><option value="{{ match.home_team_id }}" {% if event.team_id == match.home_team_id %}selected{% endif %}>{{ match.home_team.name }}</option><option value="{{ match.away_team_id }}" {% if event.team_id == match.away_team_id %}selected{% endif %}>{{ match.away_team.name }}</option></select></label><label>Joueur<select name="player"><option value="">—</option>{% for player in home_players %}<option value="{{ player.pk }}" {% if event.player_id == player.pk %}selected{% endif %}>{{ match.home_team.short_name }} · {{ player }}</option>{% endfor %}{% for player in away_players %}<option value="{{ player.pk }}" {% if event.player_id == player.pk %}selected{% endif %}>{{ match.away_team.short_name }} · {{ player }}</option>{% endfor %}</select></label><label>Destinataire<select name="recipient"><option value="">—</option>{% for player in home_players %}<option value="{{ player.pk }}" {% if event.recipient_id == player.pk %}selected{% endif %}>{{ match.home_team.short_name }} · {{ player }}</option>{% endfor %}{% for player in away_players %}<option value="{{ player.pk }}" {% if event.recipient_id == player.pk %}selected{% endif %}>{{ match.away_team.short_name }} · {{ player }}</option>{% endfor %}</select></label><label>Résultat<select name="outcome"><option value="success" {% if event.outcome == 'success' %}selected{% endif %}>Réussi</option><option value="failure" {% if event.outcome == 'failure' %}selected{% endif %}>Raté</option><option value="neutral" {% if event.outcome == 'neutral' %}selected{% endif %}>Neutre</option><option value="unknown" {% if event.outcome == 'unknown' %}selected{% endif %}>Inconnu</option></select></label><input type="hidden" name="start_x" value="{{ event.start_x|default_if_none:'' }}"><input type="hidden" name="start_y" value="{{ event.start_y|default_if_none:'' }}"><input type="hidden" name="end_x" value="{{ event.end_x|default_if_none:'' }}"><input type="hidden" name="end_y" value="{{ event.end_y|default_if_none:'' }}"><button class="button button-primary button-small">Enregistrer</button></form></details>
+                </div>
+              </td>
+            </tr>
+          {% empty %}<tr><td colspan="7"><div class="table-empty">Aucune action pour ces filtres. Lancez l’analyse ML ou changez les filtres.</div></td></tr>{% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section id="identity" class="section-block">
+    <div class="section-heading"><div><p class="eyebrow">Résolution d’identité</p><h2>Pistes → joueurs</h2></div><span class="section-note">{{ unassigned_track_count }} piste(s) à attribuer</span></div>
+    <div class="panel identity-panel">
+      <div class="identity-help"><span>◎</span><p><strong>Pourquoi cette validation ?</strong><small>La couleur classe l’équipe, mais un numéro de maillot peut être occulté. Une attribution manuelle propage immédiatement le joueur aux passes, possessions et statistiques.</small></p></div>
+      <div class="track-grid">
+        {% for track in tracks %}
+          <form class="track-card {% if track.player %}assigned{% endif %}" method="post" action="{% url 'track-assign' track.pk %}">{% csrf_token %}
+            <div class="track-preview" style="--team: {{ track.team.primary_color|default:'#667085' }}"><span>{{ track.predicted_shirt_number|default:"?" }}</span><i></i></div>
+            <div class="track-info"><strong>{{ track.track_uid }}</strong><small>{{ track.team.name|default:"Équipe inconnue" }} · {{ track.video_start_ms|timecode }}–{{ track.video_end_ms|timecode }}</small><span>{{ track.identity_confidence|percent }} confiance · {{ track.metadata.samples }} observations</span></div>
+            <select name="player_id"><option value="">Non attribué</option>{% if track.team_id == match.home_team_id or not track.team_id %}{% for player in home_players %}<option value="{{ player.pk }}" {% if track.player_id == player.pk %}selected{% endif %}>{{ match.home_team.short_name }} · {{ player }}</option>{% endfor %}{% endif %}{% if track.team_id == match.away_team_id or not track.team_id %}{% for player in away_players %}<option value="{{ player.pk }}" {% if track.player_id == player.pk %}selected{% endif %}>{{ match.away_team.short_name }} · {{ player }}</option>{% endfor %}{% endif %}</select>
+            <button class="button button-secondary button-small">Appliquer</button>
+          </form>
+        {% empty %}<div class="table-empty">Les pistes apparaîtront après une analyse avec le backend YOLO.</div>{% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section id="rosters" class="section-block">
+    <div class="section-heading"><div><p class="eyebrow">Référentiel</p><h2>Effectifs du match</h2></div><span class="section-note">CSV : name, shirt_number, position</span></div>
+    <div class="roster-grid">
+      <article class="panel roster-card" style="--team: {{ match.home_team.primary_color }}"><div class="roster-head"><span></span><h3>{{ match.home_team.name }}</h3><small>{{ home_players|length }} joueurs</small></div><div class="roster-list">{% for player in home_players %}<div><span>{{ player.shirt_number|default:"—" }}</span><strong>{{ player.name }}</strong><small>{{ player.get_position_display }}</small></div>{% empty %}<p class="muted">Aucun joueur.</p>{% endfor %}</div><form method="post" enctype="multipart/form-data" action="{% url 'match-import-roster' match.pk %}" class="inline-upload">{% csrf_token %}<input type="hidden" name="team_id" value="{{ match.home_team_id }}"><input type="file" name="roster" accept=".csv" required><button class="button button-secondary button-small">Importer CSV</button></form></article>
+      <article class="panel roster-card" style="--team: {{ match.away_team.primary_color }}"><div class="roster-head"><span></span><h3>{{ match.away_team.name }}</h3><small>{{ away_players|length }} joueurs</small></div><div class="roster-list">{% for player in away_players %}<div><span>{{ player.shirt_number|default:"—" }}</span><strong>{{ player.name }}</strong><small>{{ player.get_position_display }}</small></div>{% empty %}<p class="muted">Aucun joueur.</p>{% endfor %}</div><form method="post" enctype="multipart/form-data" action="{% url 'match-import-roster' match.pk %}" class="inline-upload">{% csrf_token %}<input type="hidden" name="team_id" value="{{ match.away_team_id }}"><input type="file" name="roster" accept=".csv" required><button class="button button-secondary button-small">Importer CSV</button></form></article>
+    </div>
+    <form class="panel quick-player-form" method="post" action="{% url 'match-add-player' match.pk %}">{% csrf_token %}<strong>Ajouter un joueur</strong><select name="team_id"><option value="{{ match.home_team_id }}">{{ match.home_team.name }}</option><option value="{{ match.away_team_id }}">{{ match.away_team.name }}</option></select>{{ player_form.name }}{{ player_form.shirt_number }}{{ player_form.position }}<button class="button button-primary button-small">Ajouter</button></form>
+  </section>
+{% endblock %}
