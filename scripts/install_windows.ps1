@@ -8,15 +8,26 @@ Set-Location $ProjectRoot
 
 Write-Host "Football Tracking - installation locale" -ForegroundColor Green
 
-if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-    throw "Python est introuvable. Installez Python 3.12 et ajoutez-le au PATH."
+$PythonLauncher = Get-Command py -ErrorAction SilentlyContinue
+if (-not $PythonLauncher) {
+    throw "Python Launcher est introuvable. Installez Python 3.12 depuis python.org, cochez Add Python to PATH, puis redemarrez VS Code."
+}
+
+& py -3.12 --version 2>$null
+if ($LASTEXITCODE -ne 0) {
+    throw "Python 3.12 est requis. Installez-le, fermez VS Code, puis relancez ce script."
 }
 
 if (-not (Test-Path ".venv")) {
-    python -m venv .venv
+    & py -3.12 -m venv .venv
 }
 
 $PythonExe = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+$EnvironmentVersion = & $PythonExe -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')"
+if ($EnvironmentVersion -ne "3.12") {
+    throw "Le dossier .venv utilise Python $EnvironmentVersion. Supprimez uniquement .venv puis relancez ce script avec Python 3.12."
+}
+
 & $PythonExe -m pip install --upgrade pip wheel setuptools
 & $PythonExe -m pip install -r requirements.txt
 
