@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -115,6 +116,59 @@ def iter_frames(
                 break
             yield timestamp_ms, frame
             next_timestamp = timestamp_ms + interval_ms
+    finally:
+        capture.release()
+
+
+def sample_timestamps(
+    *,
+    start_ms: int,
+    end_ms: int,
+    interval_ms: float,
+    max_samples: int,
+) -> list[int]:
+    """Return bounded, regularly spaced timestamps without scanning the video."""
+    start_ms = max(0, int(start_ms))
+    end_ms = max(start_ms, int(end_ms))
+    interval_ms = max(1.0, float(interval_ms))
+    max_samples = max(1, int(max_samples))
+    duration_ms = end_ms - start_ms
+    if duration_ms <= 0:
+        return []
+    interval_ms = max(interval_ms, duration_ms / max_samples)
+    count = min(max_samples, max(1, math.ceil(duration_ms / interval_ms)))
+    return [
+        start_ms + int(index * interval_ms)
+        for index in range(count)
+        if start_ms + int(index * interval_ms) < end_ms
+    ]
+
+
+def iter_sampled_frames(
+    path: str | Path,
+    timestamps_ms: list[int],
+) -> Iterator[tuple[int, object]]:
+    """Seek directly to sparse timestamps instead of decoding every prior frame.
+
+    ``iter_frames`` remains the sequential reader used by tracking, where temporal
+    continuity matters. Quality control only needs representative still frames and
+    would otherwise decode an entire multi-gigabyte match just to retain a few of
+    them.
+    """
+    import cv2
+
+    capture = cv2.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise VideoOpenError(f"Impossible d’ouvrir la vidéo : {path}")
+    try:
+        for timestamp_ms in timestamps_ms:
+            capture.set(cv2.CAP_PROP_POS_MSEC, max(0, timestamp_ms))
+            ok, frame = capture.read()
+            if not ok:
+                continue
+            # Use the requested timestamp: some OpenCV/codec combinations report
+            # zero or the previous keyframe after a random seek.
+            yield timestamp_ms, frame
     finally:
         capture.release()
 

@@ -114,6 +114,7 @@ Les valeurs se trouvent dans `.env` :
 |---|---:|---|
 | `ANALYSIS_BACKEND` | `heuristic` | `heuristic` ou `yolo` |
 | `ANALYSIS_SAMPLE_SECONDS` | `1.0` | Pas initial de diagnostic |
+| `ANALYSIS_QUALITY_MAX_SAMPLES` | `360` | Nombre maximal d’images lues directement pendant le contrôle qualité |
 | `ANALYSIS_TRACKING_FPS` | `10.0` | Images analysées par seconde |
 | `ANALYSIS_DEVICE` | `cpu` | `cpu`, `0`, `cuda:0`, selon Ultralytics |
 | `YOLO_MODEL_PATH` | `models/football-players.pt` | Poids locaux |

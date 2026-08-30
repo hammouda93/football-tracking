@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from pipeline.ball_in_play import BallInPlayEngine
 from pipeline.events import EventEngine
@@ -16,6 +19,7 @@ from pipeline.types import (
     PossessionSpan,
     TrackedObject,
 )
+from pipeline.video import iter_sampled_frames, sample_timestamps
 
 
 def sample(timestamp, state, team=None, player=None, x=None, y=None, confidence=0.9, **metadata):
@@ -44,6 +48,67 @@ class PeriodDetectorTests(unittest.TestCase):
         result = PeriodDetector().detect([], 100 * 60_000)
         self.assertTrue(result.requires_review)
         self.assertEqual(len(result.periods), 2)
+
+
+class VideoSamplingTests(unittest.TestCase):
+    def test_quality_sampling_is_bounded_and_spread_over_full_match(self):
+        timestamps = sample_timestamps(
+            start_ms=0,
+            end_ms=5_400_000,
+            interval_ms=15_000,
+            max_samples=360,
+        )
+
+        self.assertEqual(len(timestamps), 360)
+        self.assertEqual(timestamps[:3], [0, 15_000, 30_000])
+        self.assertEqual(timestamps[-1], 5_385_000)
+
+    def test_quality_sampling_never_exceeds_limit(self):
+        timestamps = sample_timestamps(
+            start_ms=0,
+            end_ms=7_200_000,
+            interval_ms=1_000,
+            max_samples=360,
+        )
+
+        self.assertEqual(len(timestamps), 360)
+        self.assertGreater(timestamps[-1], 7_100_000)
+
+    def test_sparse_reader_decodes_only_requested_frames(self):
+        class FakeCapture:
+            def __init__(self):
+                self.read_count = 0
+                self.seek_values = []
+                self.released = False
+
+            def isOpened(self):
+                return True
+
+            def set(self, _property, value):
+                self.seek_values.append(value)
+                return True
+
+            def read(self):
+                self.read_count += 1
+                return True, object()
+
+            def release(self):
+                self.released = True
+
+        capture = FakeCapture()
+        timestamps = [0, 15_000, 30_000, 45_000]
+        fake_cv2 = SimpleNamespace(
+            CAP_PROP_POS_MSEC=0,
+            VideoCapture=lambda _path: capture,
+        )
+
+        with patch.dict(sys.modules, {"cv2": fake_cv2}):
+            frames = list(iter_sampled_frames("match.mp4", timestamps))
+
+        self.assertEqual([timestamp for timestamp, _ in frames], timestamps)
+        self.assertEqual(capture.read_count, len(timestamps))
+        self.assertEqual(capture.seek_values, timestamps)
+        self.assertTrue(capture.released)
 
 
 class BallInPlayTests(unittest.TestCase):

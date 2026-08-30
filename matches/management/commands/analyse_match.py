@@ -27,6 +27,7 @@ class Command(BaseCommand):
                 "backend": options["backend"],
                 "tracking_fps": options["tracking_fps"],
                 "sample_seconds": 1.0,
+                "quality_max_samples": settings.ANALYSIS_QUALITY_MAX_SAMPLES,
                 "render_clips": not options["no_clips"],
                 "device": settings.ANALYSIS_DEVICE,
                 "yolo_model_path": settings.YOLO_MODEL_PATH,
