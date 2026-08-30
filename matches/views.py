@@ -145,6 +145,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
 @require_GET
 def analysis_status(request: HttpRequest, pk) -> JsonResponse:
     run = get_object_or_404(AnalysisRun.objects.select_related("match"), pk=pk)
+    live_progress = (run.metrics or {}).get("live_progress") or {}
     return JsonResponse(
         {
             "id": str(run.pk),
@@ -155,6 +156,7 @@ def analysis_status(request: HttpRequest, pk) -> JsonResponse:
             "progress": run.progress,
             "error": run.error_message,
             "match_status": run.match.status,
+            "progress_detail": live_progress if run.current_stage == AnalysisRun.Stage.TRACKING else {},
         }
     )
 

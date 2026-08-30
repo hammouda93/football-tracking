@@ -36,11 +36,13 @@
         const progress = banner.querySelector('[data-progress-bar]');
         const progressValue = banner.querySelector('[data-progress-value]');
         const stage = banner.querySelector('[data-stage-label]');
+        const progressDetail = banner.querySelector('[data-progress-detail]');
         const status = banner.querySelector('[data-status-label]');
         const error = banner.querySelector('[data-analysis-error]');
         if (progress) progress.style.width = `${data.progress}%`;
         if (progressValue) progressValue.textContent = `${data.progress}%`;
         if (stage) stage.textContent = data.stage_label;
+        if (progressDetail) progressDetail.textContent = data.progress_detail?.label || '';
         if (status) status.textContent = data.status_label;
         if (error && data.error) error.textContent = data.error;
         if (['completed', 'review', 'failed', 'cancelled'].includes(data.status)) {
