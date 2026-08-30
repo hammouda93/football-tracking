@@ -30,7 +30,7 @@
   {% if latest_run %}
     <section class="analysis-banner status-{{ latest_run.status|status_class }}" data-analysis-status="{% url 'analysis-status' latest_run.pk %}" data-terminal="{% if latest_run.status == 'completed' or latest_run.status == 'review' or latest_run.status == 'failed' or latest_run.status == 'cancelled' %}true{% else %}false{% endif %}">
       <div class="analysis-orb"><span></span></div>
-      <div class="analysis-copy"><small>Dernière analyse · {{ latest_run.created_at|date:"d/m H:i" }}</small><strong data-stage-label>{{ latest_run.get_current_stage_display }}</strong><div class="progress-track"><i data-progress-bar style="width: {{ latest_run.progress }}%"></i></div></div>
+      <div class="analysis-copy"><small>Dernière analyse · {{ latest_run.created_at|date:"d/m H:i" }}</small><strong data-stage-label>{{ latest_run.get_current_stage_display }}</strong><span class="analysis-detail" data-progress-detail>{% if latest_run.current_stage == 'tracking' %}{{ latest_run.metrics.live_progress.label }}{% endif %}</span><div class="progress-track"><i data-progress-bar style="width: {{ latest_run.progress }}%"></i></div></div>
       <div class="analysis-value"><strong data-progress-value>{{ latest_run.progress }}%</strong><span data-status-label>{{ latest_run.get_status_display }}</span></div>
       {% if latest_run.status == 'queued' or latest_run.status == 'processing' %}<form method="post" action="{% url 'analysis-cancel' latest_run.pk %}">{% csrf_token %}<button class="button button-danger button-small">Arrêter</button></form>{% endif %}
       {% if latest_run.error_message %}<p class="analysis-error" data-analysis-error>{{ latest_run.error_message }}</p>{% endif %}

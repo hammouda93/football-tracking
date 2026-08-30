@@ -104,12 +104,27 @@ def iter_frames(
     target_fps = target_fps or native_fps
     interval_ms = 1000.0 / max(target_fps, 0.1)
     next_timestamp = float(start_ms)
+    decoded_frames = 0
+    previous_timestamp = -1
     try:
         while True:
             ok, frame = capture.read()
             if not ok:
                 break
-            timestamp_ms = int(capture.get(cv2.CAP_PROP_POS_MSEC) or 0)
+            decoded_frames += 1
+            reported_timestamp = int(capture.get(cv2.CAP_PROP_POS_MSEC) or 0)
+            frame_position = float(capture.get(cv2.CAP_PROP_POS_FRAMES) or 0)
+            if frame_position >= 1:
+                frame_timestamp = int((frame_position - 1) * 1000.0 / native_fps)
+            else:
+                frame_timestamp = int(start_ms + (decoded_frames - 1) * 1000.0 / native_fps)
+            if reported_timestamp >= start_ms and reported_timestamp > previous_timestamp:
+                timestamp_ms = reported_timestamp
+            else:
+                timestamp_ms = max(start_ms, frame_timestamp)
+            if timestamp_ms <= previous_timestamp:
+                timestamp_ms = previous_timestamp + max(1, int(1000.0 / native_fps))
+            previous_timestamp = timestamp_ms
             if timestamp_ms + 1 < next_timestamp:
                 continue
             if end_ms is not None and timestamp_ms > end_ms:

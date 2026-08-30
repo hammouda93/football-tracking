@@ -9,6 +9,7 @@ from pipeline.ball_in_play import BallInPlayEngine
 from pipeline.events import EventEngine
 from pipeline.periods import PeriodDetector
 from pipeline.stats import StatsAggregator
+from pipeline.runner import MatchAnalysisRunner
 from pipeline.types import (
     EventCandidate,
     FrameAnalysis,
@@ -19,7 +20,7 @@ from pipeline.types import (
     PossessionSpan,
     TrackedObject,
 )
-from pipeline.video import iter_sampled_frames, sample_timestamps
+from pipeline.video import iter_frames, iter_sampled_frames, sample_timestamps
 
 
 def sample(timestamp, state, team=None, player=None, x=None, y=None, confidence=0.9, **metadata):
@@ -109,6 +110,69 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(capture.read_count, len(timestamps))
         self.assertEqual(capture.seek_values, timestamps)
         self.assertTrue(capture.released)
+
+    def test_sequential_reader_falls_back_to_frame_clock_when_msec_is_stuck(self):
+        class FakeCapture:
+            def __init__(self):
+                self.position = 0
+
+            def isOpened(self):
+                return True
+
+            def set(self, _property, _value):
+                return True
+
+            def get(self, property_id):
+                if property_id == 1:
+                    return 25.0
+                if property_id == 2:
+                    return 0.0
+                if property_id == 3:
+                    return float(self.position)
+                return 0.0
+
+            def read(self):
+                if self.position >= 26:
+                    return False, None
+                self.position += 1
+                return True, object()
+
+            def release(self):
+                return None
+
+        fake_cv2 = SimpleNamespace(
+            CAP_PROP_FPS=1,
+            CAP_PROP_POS_MSEC=2,
+            CAP_PROP_POS_FRAMES=3,
+            VideoCapture=lambda _path: FakeCapture(),
+        )
+
+        with patch.dict(sys.modules, {"cv2": fake_cv2}):
+            frames = list(iter_frames("match.mp4", target_fps=5.0))
+
+        timestamps = [timestamp for timestamp, _ in frames]
+        self.assertGreater(len(timestamps), 1)
+        self.assertEqual(timestamps[:3], [0, 200, 400])
+
+    def test_tracking_label_contains_stage_video_frames_speed_and_eta(self):
+        label = MatchAnalysisRunner._tracking_label(
+            backend="yolo",
+            device="cpu",
+            stage_progress=12.5,
+            processed_ms=675_000,
+            total_ms=5_408_000,
+            frames_processed=6_750,
+            frames_total=54_080,
+            speed_x=0.25,
+            eta_seconds=18_932,
+        )
+
+        self.assertIn("Tracking 12.5%", label)
+        self.assertIn("vidéo 11:15/1h30", label)
+        self.assertIn("6 750/54 080 images", label)
+        self.assertIn("0.25×", label)
+        self.assertIn("reste 5h15", label)
+        self.assertIn("YOLO CPU", label)
 
 
 class BallInPlayTests(unittest.TestCase):

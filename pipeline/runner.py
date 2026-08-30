@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 import tempfile
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
@@ -221,10 +223,45 @@ class MatchAnalysisRunner:
     def _track(self, periods: list[MatchPeriod], metadata) -> dict:
         self._stage(AnalysisRun.Stage.TRACKING, 22)
         backend = str(self.config.get("backend", "heuristic"))
+        device = str(self.config.get("device", "cpu"))
+        tracking_fps = max(0.5, float(self.config.get("tracking_fps", 10.0)))
+        period_duration = sum(
+            max(0, period.video_end_ms - period.video_start_ms) for period in periods
+        )
+        estimated_frames = math.ceil(period_duration / 1000.0 * tracking_fps)
+        self._save_live_progress(
+            22,
+            {
+                "stage": "tracking",
+                "stage_progress": 0.0,
+                "processed_video_ms": 0,
+                "total_video_ms": period_duration,
+                "frames_processed": 0,
+                "frames_total_estimate": estimated_frames,
+                "elapsed_seconds": 0,
+                "eta_seconds": None,
+                "speed_x": 0.0,
+                "backend": backend,
+                "device": device,
+                "tracking_fps": tracking_fps,
+                "label": self._tracking_label(
+                    backend=backend,
+                    device=device,
+                    stage_progress=0.0,
+                    processed_ms=0,
+                    total_ms=period_duration,
+                    frames_processed=0,
+                    frames_total=estimated_frames,
+                    speed_x=0.0,
+                    eta_seconds=None,
+                    initializing=True,
+                ),
+            },
+        )
         provider = build_provider(
             backend,
             model_path=self.config.get("yolo_model_path", ""),
-            device=self.config.get("device", "cpu"),
+            device=device,
             confidence=float(self.config.get("yolo_confidence", 0.30)),
             image_size=int(self.config.get("yolo_image_size", 1280)),
             team_colors={
@@ -232,10 +269,9 @@ class MatchAnalysisRunner:
                 "away": self.match.away_team.primary_color,
             },
         )
-        tracking_fps = max(0.5, float(self.config.get("tracking_fps", 10.0)))
-        period_duration = sum(
-            max(0, period.video_end_ms - period.video_start_ms) for period in periods
-        )
+        tracking_started_at = time.monotonic()
+        last_live_update = 0.0
+        frames_processed = 0
         processed_ms = 0
         all_samples: list[tuple[MatchPeriod, PossessionSample]] = []
         all_spans: list[tuple[MatchPeriod, PossessionSpan]] = []
@@ -260,7 +296,6 @@ class MatchAnalysisRunner:
                     ball_engine = BallInPlayEngine()
                     period_samples: list[PossessionSample] = []
                     period_prefix = f"p{period.number}-"
-                    last_progress_update = -1
                     for timestamp_ms, frame in iter_frames(
                         metadata.path,
                         start_ms=period.video_start_ms,
@@ -268,6 +303,7 @@ class MatchAnalysisRunner:
                         target_fps=tracking_fps,
                     ):
                         analysis = provider.analyze_frame(frame, timestamp_ms)
+                        frames_processed += 1
                         motion = camera.update(frame, scene_cut=analysis.scene_cut)
                         analysis.camera = motion.to_dict()
                         camera_summary["frames"] += 1
@@ -298,10 +334,48 @@ class MatchAnalysisRunner:
                             + "\n"
                         )
                         current_processed = processed_ms + timestamp_ms - period.video_start_ms
-                        percent = 22 + int(46 * current_processed / max(period_duration, 1))
-                        if percent != last_progress_update:
-                            self._stage(AnalysisRun.Stage.TRACKING, percent)
-                            last_progress_update = percent
+                        current_processed = max(0, min(period_duration, current_processed))
+                        now = time.monotonic()
+                        progress_ratio = current_processed / max(period_duration, 1)
+                        percent = min(68, 22 + int(46 * progress_ratio))
+                        if now - last_live_update >= 2.0 or percent != self.last_progress:
+                            elapsed_seconds = max(0.001, now - tracking_started_at)
+                            processed_seconds = current_processed / 1000.0
+                            speed_x = processed_seconds / elapsed_seconds
+                            remaining_seconds = max(
+                                0.0,
+                                (period_duration - current_processed) / 1000.0,
+                            )
+                            eta_seconds = (
+                                remaining_seconds / speed_x if speed_x > 0.0001 else None
+                            )
+                            detail = {
+                                "stage": "tracking",
+                                "stage_progress": round(progress_ratio * 100.0, 2),
+                                "processed_video_ms": current_processed,
+                                "total_video_ms": period_duration,
+                                "frames_processed": frames_processed,
+                                "frames_total_estimate": estimated_frames,
+                                "elapsed_seconds": round(elapsed_seconds, 1),
+                                "eta_seconds": round(eta_seconds) if eta_seconds is not None else None,
+                                "speed_x": round(speed_x, 3),
+                                "backend": backend,
+                                "device": device,
+                                "tracking_fps": tracking_fps,
+                            }
+                            detail["label"] = self._tracking_label(
+                                backend=backend,
+                                device=device,
+                                stage_progress=detail["stage_progress"],
+                                processed_ms=current_processed,
+                                total_ms=period_duration,
+                                frames_processed=frames_processed,
+                                frames_total=estimated_frames,
+                                speed_x=speed_x,
+                                eta_seconds=eta_seconds,
+                            )
+                            self._save_live_progress(percent, detail)
+                            last_live_update = now
                     processed_ms += max(0, period.video_end_ms - period.video_start_ms)
                     spans = ball_engine.compress(
                         period_samples,
@@ -346,6 +420,55 @@ class MatchAnalysisRunner:
             "tracks": track_summaries,
             "camera": camera_summary,
         }
+
+    def _save_live_progress(self, progress: int, detail: dict) -> None:
+        self._check_cancelled()
+        metrics = dict(self.run.metrics or {})
+        metrics["live_progress"] = detail
+        self.run.current_stage = AnalysisRun.Stage.TRACKING
+        self.run.progress = max(0, min(100, progress))
+        self.run.metrics = metrics
+        self.run.save(update_fields=["current_stage", "progress", "metrics"])
+        self.last_progress = self.run.progress
+
+    @classmethod
+    def _tracking_label(
+        cls,
+        *,
+        backend: str,
+        device: str,
+        stage_progress: float,
+        processed_ms: int,
+        total_ms: int,
+        frames_processed: int,
+        frames_total: int,
+        speed_x: float,
+        eta_seconds: float | None,
+        initializing: bool = False,
+    ) -> str:
+        engine = backend.upper()
+        if backend == "yolo":
+            engine = f"YOLO {device.upper()}"
+        if initializing:
+            return f"Initialisation {engine} · {frames_total:,} images prévues".replace(",", " ")
+        eta = "ETA en calcul"
+        if eta_seconds is not None:
+            eta = f"reste {cls._duration_label(eta_seconds)}"
+        frames = f"{frames_processed:,}/{frames_total:,}".replace(",", " ")
+        return (
+            f"Tracking {stage_progress:.1f}% · vidéo {cls._duration_label(processed_ms / 1000)}"
+            f"/{cls._duration_label(total_ms / 1000)} · {frames} images · "
+            f"{speed_x:.2f}× · {eta} · {engine}"
+        )
+
+    @staticmethod
+    def _duration_label(seconds: float) -> str:
+        total_seconds = max(0, int(round(seconds)))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        if hours:
+            return f"{hours:d}h{minutes:02d}"
+        return f"{minutes:02d}:{secs:02d}"
 
     def _normalize_objects(
         self,
