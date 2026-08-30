@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from statistics import fmean
+from typing import Callable
 
 import numpy as np
 
 from .types import FrameSignal, VideoMetadata
-from .video import iter_frames
+from .video import iter_sampled_frames, sample_timestamps
 
 
 @dataclass(slots=True)
@@ -30,7 +31,12 @@ class VideoQualityAnalyzer:
         self.sample_seconds = max(0.5, sample_seconds)
         self.max_samples = max_samples
 
-    def analyze(self, metadata: VideoMetadata) -> QualityReport:
+    def analyze(
+        self,
+        metadata: VideoMetadata,
+        *,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> QualityReport:
         import cv2
 
         # Spread a bounded number of samples over the *whole* recording. This is
@@ -40,12 +46,16 @@ class VideoQualityAnalyzer:
             self.sample_seconds,
             duration_seconds / max(self.max_samples, 1),
         )
-        target_fps = 1.0 / effective_sample_seconds
+        timestamps = sample_timestamps(
+            start_ms=0,
+            end_ms=metadata.duration_ms,
+            interval_ms=effective_sample_seconds * 1000.0,
+            max_samples=self.max_samples,
+        )
         signals: list[FrameSignal] = []
         previous_gray = None
-        for timestamp_ms, frame in iter_frames(metadata.path, target_fps=target_fps):
-            if len(signals) >= self.max_samples:
-                break
+        last_callback_percent = -1
+        for timestamp_ms, frame in iter_sampled_frames(metadata.path, timestamps):
             height, width = frame.shape[:2]
             scale = min(1.0, 640.0 / max(width, 1))
             if scale < 1:
@@ -78,6 +88,12 @@ class VideoQualityAnalyzer:
                     replay_probability=0.7 if scene_cut and field_score < 0.22 else 0.0,
                 )
             )
+            if progress_callback is not None:
+                completed = len(signals)
+                callback_percent = int(100 * completed / max(len(timestamps), 1))
+                if callback_percent != last_callback_percent:
+                    progress_callback(completed, len(timestamps))
+                    last_callback_percent = callback_percent
         if not signals:
             return QualityReport(score=0.0, grade="reject", metrics={}, signals=[])
 

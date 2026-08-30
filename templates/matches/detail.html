@@ -41,7 +41,7 @@
     <article class="panel video-panel">
       <div class="panel-heading"><div><p class="eyebrow">Source</p><h2>Vidéo du match</h2></div>{% if match.video %}<span>{{ match.video.width }}×{{ match.video.height }} · {{ match.video.fps|floatformat:1 }} fps</span>{% endif %}</div>
       {% if match.video %}
-        <div class="video-shell"><video id="match-video" controls preload="metadata" src="{{ match.video.file.url }}"></video><div class="video-watermark">FT / LOCAL</div></div>
+        <div class="video-shell"><video id="match-video" controls preload="none" src="{{ match.video.file.url }}"></video><div class="video-watermark">FT / LOCAL</div></div>
       {% else %}
         <div class="video-placeholder"><span>◫</span><p>Match de démonstration — aucune vidéo source.</p></div>
       {% endif %}

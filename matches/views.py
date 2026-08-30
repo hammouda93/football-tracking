@@ -128,6 +128,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "backend": settings.ANALYSIS_BACKEND,
             "device": settings.ANALYSIS_DEVICE,
             "sample_seconds": settings.ANALYSIS_SAMPLE_SECONDS,
+            "quality_max_samples": settings.ANALYSIS_QUALITY_MAX_SAMPLES,
             "tracking_fps": settings.ANALYSIS_TRACKING_FPS,
             "yolo_model_path": settings.YOLO_MODEL_PATH,
             "yolo_confidence": settings.YOLO_CONFIDENCE,

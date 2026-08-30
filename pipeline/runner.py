@@ -154,9 +154,10 @@ class MatchAnalysisRunner:
         self._stage(AnalysisRun.Stage.QUALITY, 7)
         analyzer = VideoQualityAnalyzer(
             sample_seconds=float(self.config.get("sample_seconds", 1.0)),
-            max_samples=int(self.config.get("quality_max_samples", 1_200)),
+            max_samples=int(self.config.get("quality_max_samples", 360)),
         )
-        report = analyzer.analyze(metadata)
+        report = analyzer.analyze(metadata, progress_callback=self._quality_progress)
+        self._stage(AnalysisRun.Stage.QUALITY, 15)
         self.video.quality_grade = report.grade
         self.video.quality_score = report.score
         self.video.quality_metrics = report.metrics
@@ -169,6 +170,11 @@ class MatchAnalysisRunner:
             metadata={"score": report.score, "grade": report.grade},
         )
         return report
+
+    def _quality_progress(self, completed: int, total: int) -> None:
+        self._check_cancelled()
+        progress = 7 + int(8 * completed / max(total, 1))
+        self._stage(AnalysisRun.Stage.QUALITY, min(progress, 15))
 
     def _periods(self, signals, duration_ms: int) -> list[MatchPeriod]:
         self._stage(AnalysisRun.Stage.PERIODS, 16)
