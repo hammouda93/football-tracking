@@ -74,6 +74,9 @@ class DashboardTests(TestCase):
         self.assertEqual(run.config["sample_window_seconds"], 30)
         self.assertEqual(run.config["sample_windows_per_half"], 2)
         self.assertFalse(run.config["render_clips"])
+        self.assertEqual(run.config["min_yolo_tracking_fps"], 8.0)
+        self.assertEqual(run.config["yolo_player_class_ids"], [2])
+        self.assertEqual(run.config["yolo_ball_class_ids"], [0])
 
     def test_full_analysis_is_blocked_until_sample_passes(self):
         home = Team.objects.create(name="Home", short_name="HOM")

@@ -116,10 +116,15 @@ Les valeurs se trouvent dans `.env` :
 | `ANALYSIS_SAMPLE_SECONDS` | `1.0` | Pas initial de diagnostic |
 | `ANALYSIS_QUALITY_MAX_SAMPLES` | `360` | Nombre maximal d’images lues directement pendant le contrôle qualité |
 | `ANALYSIS_TRACKING_FPS` | `10.0` | Images analysées par seconde |
+| `ANALYSIS_MIN_YOLO_TRACKING_FPS` | `8.0` | Plancher de cadence imposé à ByteTrack pour limiter la fragmentation |
 | `ANALYSIS_DEVICE` | `cpu` | `cpu`, `0`, `cuda:0`, selon Ultralytics |
 | `YOLO_MODEL_PATH` | `models/football-players.pt` | Poids locaux |
 | `YOLO_CONFIDENCE` | `0.30` | Seuil de détection |
 | `YOLO_IMAGE_SIZE` | `1280` | Résolution d’inférence |
+| `YOLO_PLAYER_CLASS_IDS` | `2` | IDs numériques des classes joueur, séparés par des virgules |
+| `YOLO_GOALKEEPER_CLASS_IDS` | vide | IDs numériques des classes gardien |
+| `YOLO_REFEREE_CLASS_IDS` | `3` | IDs numériques des classes arbitre |
+| `YOLO_BALL_CLASS_IDS` | `0` | IDs numériques des classes ballon |
 | `FFMPEG_BINARY` | `ffmpeg` | Binaire FFmpeg |
 | `FFPROBE_BINARY` | `ffprobe` | Binaire ffprobe |
 
@@ -133,7 +138,7 @@ python manage.py diagnose
 
 ```bash
 python manage.py test
-python -m unittest tests.test_pipeline
+python manage.py test tests.test_pipeline
 ```
 
 ## Formats de données

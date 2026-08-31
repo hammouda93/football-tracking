@@ -7,6 +7,14 @@ from dotenv import load_dotenv
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
+
+def _csv_ints(name: str, default: str = "") -> list[int]:
+    return [
+        int(value.strip())
+        for value in os.getenv(name, default).split(",")
+        if value.strip()
+    ]
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "football-tracking-local-development-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
 ALLOWED_HOSTS = [
@@ -83,6 +91,9 @@ ANALYSIS_BACKEND = os.getenv("ANALYSIS_BACKEND", "heuristic")
 ANALYSIS_SAMPLE_SECONDS = float(os.getenv("ANALYSIS_SAMPLE_SECONDS", "1.0"))
 ANALYSIS_QUALITY_MAX_SAMPLES = int(os.getenv("ANALYSIS_QUALITY_MAX_SAMPLES", "360"))
 ANALYSIS_TRACKING_FPS = float(os.getenv("ANALYSIS_TRACKING_FPS", "10.0"))
+ANALYSIS_MIN_YOLO_TRACKING_FPS = float(
+    os.getenv("ANALYSIS_MIN_YOLO_TRACKING_FPS", "8.0")
+)
 ANALYSIS_DEVICE = os.getenv("ANALYSIS_DEVICE", "cpu")
 _yolo_model_path = Path(
     os.getenv("YOLO_MODEL_PATH", str(BASE_DIR / "models" / "football-players.pt"))
@@ -92,6 +103,10 @@ YOLO_MODEL_PATH = str(
 )
 YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.30"))
 YOLO_IMAGE_SIZE = int(os.getenv("YOLO_IMAGE_SIZE", "1280"))
+YOLO_PLAYER_CLASS_IDS = _csv_ints("YOLO_PLAYER_CLASS_IDS", "2")
+YOLO_GOALKEEPER_CLASS_IDS = _csv_ints("YOLO_GOALKEEPER_CLASS_IDS")
+YOLO_REFEREE_CLASS_IDS = _csv_ints("YOLO_REFEREE_CLASS_IDS", "3")
+YOLO_BALL_CLASS_IDS = _csv_ints("YOLO_BALL_CLASS_IDS", "0")
 FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg")
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe")
 

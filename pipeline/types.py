@@ -97,6 +97,7 @@ class FrameAnalysis:
     replay_probability: float = 0.0
     coordinate_space: str = "image_normalized"
     camera: dict[str, Any] = field(default_factory=dict)
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ball(self) -> TrackedObject | None:

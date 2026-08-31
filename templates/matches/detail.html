@@ -45,15 +45,18 @@
       <div class="diagnostic-grid">
         <div><strong>{{ sample_diagnostics.duration_seconds|floatformat:0 }} s</strong><small>vidéo testée</small></div>
         <div><strong>{{ sample_diagnostics.frames_analyzed }}</strong><small>images analysées</small></div>
-        <div><strong>{{ sample_diagnostics.average_athletes_per_frame|floatformat:1 }}</strong><small>joueurs / image</small></div>
+        <div><strong>{{ sample_diagnostics.average_player_detections_per_frame|default:sample_diagnostics.average_athletes_per_frame|floatformat:1 }}</strong><small>détections YOLO / image</small></div>
+        <div><strong>{{ sample_diagnostics.average_tracked_athletes_per_frame|default:sample_diagnostics.average_athletes_per_frame|floatformat:1 }}</strong><small>joueurs suivis / image</small></div>
         <div><strong>{{ sample_diagnostics.ball_visibility_pct|floatformat:1 }}%</strong><small>ballon visible</small></div>
         <div><strong>{{ sample_diagnostics.playable_candidate_pct|floatformat:1 }}%</strong><small>jeu effectif candidat</small></div>
         <div><strong>{{ sample_diagnostics.tracks_per_minute|floatformat:1 }}</strong><small>pistes / minute</small></div>
         <div><strong>{{ sample_diagnostics.home_team_share_pct|floatformat:1 }}%</strong><small>{{ match.home_team.short_name }}</small></div>
         <div><strong>{{ sample_diagnostics.away_team_share_pct|floatformat:1 }}%</strong><small>{{ match.away_team.short_name }}</small></div>
+        {% if sample_diagnostics.tracking_fps %}<div><strong>{{ sample_diagnostics.tracking_fps|floatformat:1 }} FPS</strong><small>cadence ByteTrack</small></div>{% endif %}
       </div>
       {% if sample_previews %}<div class="sample-preview-grid">{% for preview in sample_previews %}<figure><a href="{{ preview.url }}" target="_blank"><img src="{{ preview.url }}" alt="Aperçu annoté MT{{ preview.period }} séquence {{ preview.window }}"></a><figcaption>MT{{ preview.period }} · {{ preview.video_time_ms|timecode }}</figcaption></figure>{% endfor %}</div>{% endif %}
       {% if sample_diagnostics.issues %}<ul class="diagnostic-issues">{% for issue in sample_diagnostics.issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% endif %}
+      {% if sample_diagnostics.model_classes %}<p class="diagnostic-note"><strong>Classes lues dans le modèle :</strong> {% for class_id,class_name in sample_diagnostics.model_classes.items %}<code>{{ class_id }}={{ class_name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}</p>{% endif %}
       <div class="sample-windows"><strong>Séquences contrôlées :</strong>{% for window in sample_windows %}<button class="timecode-button" data-video-ms="{{ window.start_ms }}">MT{{ window.period }} · {{ window.start_ms|timecode }} ▶</button>{% endfor %}</div>
       <p class="diagnostic-note">Ce test ne crée ni tirs, ni passes, ni statistiques de match. Il vérifie seulement que la base visuelle est assez fiable avant plusieurs heures de calcul.</p>
     </section>

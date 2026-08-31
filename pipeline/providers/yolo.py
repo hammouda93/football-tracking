@@ -32,6 +32,11 @@ class YoloVisionProvider(VisionProvider):
         device: str = "cpu",
         confidence: float = 0.3,
         image_size: int = 1280,
+        tracking_fps: float = 10.0,
+        player_class_ids: list[int] | tuple[int, ...] | None = None,
+        goalkeeper_class_ids: list[int] | tuple[int, ...] | None = None,
+        referee_class_ids: list[int] | tuple[int, ...] | None = None,
+        ball_class_ids: list[int] | tuple[int, ...] | None = None,
         team_colors: dict[str, str] | None = None,
         **_: object,
     ):
@@ -49,14 +54,19 @@ class YoloVisionProvider(VisionProvider):
         self.device = device
         self.confidence = confidence
         self.image_size = image_size
+        self.tracking_fps = max(1.0, float(tracking_fps))
+        self.class_roles: dict[int, ObjectRole] = {}
+        self._register_class_ids(player_class_ids, ObjectRole.PLAYER)
+        self._register_class_ids(goalkeeper_class_ids, ObjectRole.GOALKEEPER)
+        self._register_class_ids(referee_class_ids, ObjectRole.REFEREE)
+        self._register_class_ids(ball_class_ids, ObjectRole.BALL)
         self.team_colors = {
             key: self._hex_to_lab(value) for key, value in (team_colors or {}).items()
         }
         self.previous_gray = None
         self.tracker = self._build_tracker()
 
-    @staticmethod
-    def _build_tracker():
+    def _build_tracker(self):
         try:
             import supervision as sv
         except ImportError as exc:
@@ -65,9 +75,9 @@ class YoloVisionProvider(VisionProvider):
             ) from exc
         return sv.ByteTrack(
             track_activation_threshold=0.25,
-            lost_track_buffer=90,
+            lost_track_buffer=max(15, int(round(self.tracking_fps * 3.0))),
             minimum_matching_threshold=0.75,
-            frame_rate=30,
+            frame_rate=max(1, int(round(self.tracking_fps))),
         )
 
     def reset(self) -> None:
@@ -92,10 +102,21 @@ class YoloVisionProvider(VisionProvider):
         names = prediction.names
         detections = sv.Detections.from_ultralytics(prediction)
 
-        athlete_mask = np.array(
-            [self._role(names[int(class_id)]) != ObjectRole.BALL for class_id in detections.class_id],
-            dtype=bool,
-        ) if len(detections) else np.array([], dtype=bool)
+        roles = (
+            [self._role_for(int(class_id), names) for class_id in detections.class_id]
+            if len(detections)
+            else []
+        )
+        trackable_roles = {
+            ObjectRole.PLAYER,
+            ObjectRole.GOALKEEPER,
+            ObjectRole.REFEREE,
+        }
+        athlete_mask = (
+            np.array([role in trackable_roles for role in roles], dtype=bool)
+            if len(detections)
+            else np.array([], dtype=bool)
+        )
         athletes = detections[athlete_mask] if len(detections) else detections
         tracked_athletes = self.tracker.update_with_detections(athletes)
 
@@ -106,7 +127,7 @@ class YoloVisionProvider(VisionProvider):
             tracked_athletes.class_id,
             tracked_athletes.tracker_id,
         ):
-            role = self._role(names[int(class_id)])
+            role = self._role_for(int(class_id), names)
             x1, y1, x2, y2 = [float(value) for value in xyxy]
             image_x = ((x1 + x2) / 2.0) / max(width, 1)
             image_y = y2 / max(height, 1)
@@ -133,7 +154,7 @@ class YoloVisionProvider(VisionProvider):
                 detections.confidence,
                 detections.class_id,
             ):
-                if self._role(names[int(class_id)]) != ObjectRole.BALL:
+                if self._role_for(int(class_id), names) != ObjectRole.BALL:
                     continue
                 x1, y1, x2, y2 = [float(value) for value in xyxy]
                 objects.append(
@@ -156,7 +177,46 @@ class YoloVisionProvider(VisionProvider):
             objects=objects,
             scene_cut=scene_cut,
             replay_probability=0.72 if scene_cut and field_score < 0.2 else 0.0,
+            diagnostics={
+                "raw_athlete_detections": sum(
+                    role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
+                    for role in roles
+                ),
+                "raw_referee_detections": sum(
+                    role == ObjectRole.REFEREE for role in roles
+                ),
+                "raw_ball_detections": sum(role == ObjectRole.BALL for role in roles),
+                "raw_other_detections": sum(role == ObjectRole.OTHER for role in roles),
+                "tracked_athletes": sum(
+                    item.role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
+                    for item in objects
+                ),
+                "model_classes": {
+                    str(key): str(value)
+                    for key, value in (
+                        names.items() if hasattr(names, "items") else enumerate(names)
+                    )
+                },
+            },
         )
+
+    def _register_class_ids(
+        self,
+        class_ids: list[int] | tuple[int, ...] | None,
+        role: ObjectRole,
+    ) -> None:
+        for class_id in class_ids or []:
+            self.class_roles[int(class_id)] = role
+
+    def _role_for(self, class_id: int, names) -> ObjectRole:
+        explicit = self.class_roles.get(int(class_id))
+        if explicit is not None:
+            return explicit
+        try:
+            name = names[int(class_id)]
+        except (IndexError, KeyError, TypeError):
+            return ObjectRole.OTHER
+        return self._role(name)
 
     def _field_and_cut(self, frame) -> tuple[float, bool]:
         import cv2

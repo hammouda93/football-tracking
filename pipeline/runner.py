@@ -259,7 +259,17 @@ class MatchAnalysisRunner:
         self._stage(AnalysisRun.Stage.TRACKING, 22)
         backend = str(self.config.get("backend", "heuristic"))
         device = str(self.config.get("device", "cpu"))
-        tracking_fps = max(0.5, float(self.config.get("tracking_fps", 10.0)))
+        requested_tracking_fps = max(
+            0.5, float(self.config.get("tracking_fps", 10.0))
+        )
+        tracking_fps = self._effective_tracking_fps(
+            backend=backend,
+            requested_fps=requested_tracking_fps,
+            native_fps=float(metadata.fps or 0.0),
+            minimum_yolo_fps=float(
+                self.config.get("min_yolo_tracking_fps", 8.0)
+            ),
+        )
         windows = self._tracking_windows(periods)
         tracking_duration = sum(window["end_ms"] - window["start_ms"] for window in windows)
         estimated_frames = math.ceil(tracking_duration / 1000.0 * tracking_fps)
@@ -279,6 +289,7 @@ class MatchAnalysisRunner:
                 "backend": backend,
                 "device": device,
                 "tracking_fps": tracking_fps,
+                "requested_tracking_fps": requested_tracking_fps,
                 "label": self._tracking_label(
                     backend=backend,
                     device=device,
@@ -300,6 +311,11 @@ class MatchAnalysisRunner:
             device=device,
             confidence=float(self.config.get("yolo_confidence", 0.30)),
             image_size=int(self.config.get("yolo_image_size", 1280)),
+            tracking_fps=tracking_fps,
+            player_class_ids=self.config.get("yolo_player_class_ids", []),
+            goalkeeper_class_ids=self.config.get("yolo_goalkeeper_class_ids", []),
+            referee_class_ids=self.config.get("yolo_referee_class_ids", []),
+            ball_class_ids=self.config.get("yolo_ball_class_ids", []),
             team_colors={
                 "home": self.match.home_team.primary_color,
                 "away": self.match.away_team.primary_color,
@@ -322,6 +338,7 @@ class MatchAnalysisRunner:
         camera_inliers: list[float] = []
         diagnostic_counts: Counter = Counter()
         team_observations: Counter = Counter()
+        model_classes: dict[str, str] = {}
         preview_artifacts: list[dict] = []
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
@@ -367,6 +384,21 @@ class MatchAnalysisRunner:
                         all_samples.append((period, sample))
                         diagnostic_counts["frames"] += 1
                         diagnostic_counts["athlete_observations"] += len(analysis.athletes)
+                        diagnostic_counts["raw_athlete_detections"] += int(
+                            analysis.diagnostics.get(
+                                "raw_athlete_detections", len(analysis.athletes)
+                            )
+                        )
+                        diagnostic_counts["raw_referee_detections"] += int(
+                            analysis.diagnostics.get("raw_referee_detections", 0)
+                        )
+                        diagnostic_counts["raw_ball_detections"] += int(
+                            analysis.diagnostics.get("raw_ball_detections", 0)
+                        )
+                        diagnostic_counts["raw_other_detections"] += int(
+                            analysis.diagnostics.get("raw_other_detections", 0)
+                        )
+                        model_classes.update(analysis.diagnostics.get("model_classes") or {})
                         diagnostic_counts["ball_visible_frames"] += int(analysis.ball is not None)
                         diagnostic_counts["field_frames"] += int(
                             analysis.field_score >= 0.14
@@ -449,6 +481,7 @@ class MatchAnalysisRunner:
                                 "backend": backend,
                                 "device": device,
                                 "tracking_fps": tracking_fps,
+                                "requested_tracking_fps": requested_tracking_fps,
                             }
                             detail["label"] = self._tracking_label(
                                 backend=backend,
@@ -484,6 +517,7 @@ class MatchAnalysisRunner:
                 metadata={
                     "backend": backend,
                     "tracking_fps": tracking_fps,
+                    "requested_tracking_fps": requested_tracking_fps,
                     "coordinate_systems": ["image_normalized", "pitch_meters"],
                     "analysis_mode": self.analysis_mode,
                     "windows": [self._window_payload(window) for window in windows],
@@ -507,11 +541,15 @@ class MatchAnalysisRunner:
             team_observations,
             track_count=len(track_summaries),
             tracking_duration_ms=tracking_duration,
+            tracking_fps=tracking_fps,
+            requested_tracking_fps=requested_tracking_fps,
+            model_classes=model_classes,
         )
         return {
             "analysis_mode": self.analysis_mode,
             "backend": backend,
             "tracking_fps": tracking_fps,
+            "requested_tracking_fps": requested_tracking_fps,
             "samples": all_samples,
             "spans": all_spans,
             "events": all_events,
@@ -619,8 +657,16 @@ class MatchAnalysisRunner:
         *,
         track_count: int,
         tracking_duration_ms: int,
+        tracking_fps: float = 0.0,
+        requested_tracking_fps: float = 0.0,
+        model_classes: dict[str, str] | None = None,
     ) -> dict:
         frames = max(int(counts["frames"]), 0)
+        raw_athlete_observations = int(
+            counts["raw_athlete_detections"]
+            if "raw_athlete_detections" in counts
+            else counts["athlete_observations"]
+        )
         duration_minutes = max(tracking_duration_ms / 60_000, 1 / 60)
         known_team_observations = int(team_observations["home"] + team_observations["away"])
         home_share_pct = (
@@ -641,6 +687,12 @@ class MatchAnalysisRunner:
             "frames_analyzed": frames,
             "duration_seconds": round(tracking_duration_ms / 1_000, 1),
             "average_athletes_per_frame": round(
+                raw_athlete_observations / max(frames, 1), 2
+            ),
+            "average_player_detections_per_frame": round(
+                raw_athlete_observations / max(frames, 1), 2
+            ),
+            "average_tracked_athletes_per_frame": round(
                 counts["athlete_observations"] / max(frames, 1), 2
             ),
             "ball_visibility_pct": round(
@@ -653,14 +705,24 @@ class MatchAnalysisRunner:
             "home_team_share_pct": round(home_share_pct, 2),
             "away_team_share_pct": round(away_share_pct, 2),
             "unknown_team_observations": int(team_observations["unknown"]),
+            "raw_referee_detections": int(counts["raw_referee_detections"]),
+            "raw_ball_detections": int(counts["raw_ball_detections"]),
+            "raw_other_detections": int(counts["raw_other_detections"]),
+            "tracking_fps": round(float(tracking_fps), 2),
+            "requested_tracking_fps": round(float(requested_tracking_fps), 2),
+            "model_classes": model_classes or {},
             "issues": [],
         }
         failures: list[str] = []
         warnings: list[str] = []
         if frames < 50:
             failures.append("Trop peu d’images ont été analysées.")
-        if diagnostics["average_athletes_per_frame"] < 6:
+        if diagnostics["average_player_detections_per_frame"] < 6:
             failures.append("Moins de 6 joueurs sont détectés en moyenne par image.")
+        elif diagnostics["average_tracked_athletes_per_frame"] < 6:
+            failures.append(
+                "YOLO détecte les joueurs, mais ByteTrack n’en conserve pas 6 par image."
+            )
         if diagnostics["ball_visibility_pct"] < 10:
             failures.append("Le ballon est visible sur moins de 10 % des images.")
         if diagnostics["playable_candidate_pct"] < 10:
@@ -676,6 +738,21 @@ class MatchAnalysisRunner:
         diagnostics["issues"] = failures + warnings
         diagnostics["verdict"] = "fail" if failures else ("warning" if warnings else "pass")
         return diagnostics
+
+    @staticmethod
+    def _effective_tracking_fps(
+        *,
+        backend: str,
+        requested_fps: float,
+        native_fps: float,
+        minimum_yolo_fps: float,
+    ) -> float:
+        effective = max(0.5, float(requested_fps))
+        if backend.strip().lower() == "yolo":
+            effective = max(effective, max(1.0, float(minimum_yolo_fps)))
+        if native_fps > 0:
+            effective = min(effective, float(native_fps))
+        return round(effective, 3)
 
     def _save_live_progress(self, progress: int, detail: dict) -> None:
         self._check_cancelled()
