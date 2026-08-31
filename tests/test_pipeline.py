@@ -9,6 +9,7 @@ from unittest.mock import patch
 from pipeline.ball_in_play import BallInPlayEngine
 from pipeline.events import EventEngine
 from pipeline.periods import PeriodDetector
+from pipeline.providers.yolo import YoloVisionProvider
 from pipeline.stats import StatsAggregator
 from pipeline.runner import MatchAnalysisRunner
 from pipeline.types import (
@@ -175,6 +176,37 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertIn("reste 5h15", label)
         self.assertIn("YOLO CPU", label)
 
+    def test_yolo_tracking_fps_has_a_temporal_continuity_floor(self):
+        effective = MatchAnalysisRunner._effective_tracking_fps(
+            backend="yolo",
+            requested_fps=2.0,
+            native_fps=25.0,
+            minimum_yolo_fps=8.0,
+        )
+
+        self.assertEqual(effective, 8.0)
+
+    def test_heuristic_tracking_fps_is_not_forced_up(self):
+        effective = MatchAnalysisRunner._effective_tracking_fps(
+            backend="heuristic",
+            requested_fps=2.0,
+            native_fps=25.0,
+            minimum_yolo_fps=8.0,
+        )
+
+        self.assertEqual(effective, 2.0)
+
+    def test_explicit_model_class_ids_override_unknown_names(self):
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.class_roles = {
+            0: ObjectRole.BALL,
+            2: ObjectRole.PLAYER,
+            3: ObjectRole.REFEREE,
+        }
+
+        self.assertEqual(provider._role_for(2, {2: "athlete"}), ObjectRole.PLAYER)
+        self.assertEqual(provider._role_for(0, {0: "tiny-object"}), ObjectRole.BALL)
+
     def test_sample_uses_two_thirty_second_windows_per_half(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {
@@ -198,6 +230,7 @@ class VideoSamplingTests(unittest.TestCase):
             Counter(
                 {
                     "frames": 1_200,
+                    "raw_athlete_detections": 14_400,
                     "athlete_observations": 14_400,
                     "ball_visible_frames": 24,
                     "field_frames": 1_100,
@@ -213,6 +246,27 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(diagnostics["verdict"], "fail")
         self.assertLess(diagnostics["ball_visibility_pct"], 10)
         self.assertGreater(diagnostics["tracks_per_minute"], 80)
+
+    def test_diagnostics_distinguish_yolo_recall_from_tracker_retention(self):
+        diagnostics = MatchAnalysisRunner._tracking_diagnostics(
+            Counter(
+                {
+                    "frames": 100,
+                    "raw_athlete_detections": 1_100,
+                    "athlete_observations": 450,
+                    "ball_visible_frames": 40,
+                    "field_frames": 100,
+                    "state_controlled": 40,
+                }
+            ),
+            Counter({"home": 250, "away": 200}),
+            track_count=20,
+            tracking_duration_ms=120_000,
+        )
+
+        self.assertEqual(diagnostics["average_player_detections_per_frame"], 11.0)
+        self.assertEqual(diagnostics["average_tracked_athletes_per_frame"], 4.5)
+        self.assertIn("ByteTrack", " ".join(diagnostics["issues"]))
 
 
 class BallInPlayTests(unittest.TestCase):
