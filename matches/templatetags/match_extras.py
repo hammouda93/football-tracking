@@ -27,6 +27,14 @@ def percent(value):
 
 
 @register.filter
+def ratio_percent(value):
+    try:
+        return f"{float(value) * 100:.1f}%"
+    except (TypeError, ValueError):
+        return "0.0%"
+
+
+@register.filter
 def number(value):
     try:
         numeric = float(value)

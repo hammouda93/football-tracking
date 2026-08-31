@@ -28,11 +28,11 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 ```mermaid
 flowchart TD
     A["Vidéo complète"] --> B["Qualité + périodes"]
-    B --> C["Détection + tracking"]
-    C --> D["Caméra + terrain"]
-    D --> E["Ball in play + possession"]
-    E --> F["Actions + statistiques"]
-    F --> G["Validation + exports"]
+    B --> C["Test rapide · 4 × 30 s"]
+    C --> D{"Détections fiables ?"}
+    D -->|Non| E["Corriger modèle + couleurs"]
+    D -->|Oui| F["Analyse complète"]
+    F --> G["Ball in play + actions + statistiques"]
 ```
 
 Le détail des décisions techniques et des limites est dans [docs/architecture.md](docs/architecture.md).
@@ -94,11 +94,11 @@ Le serveur Django et le worker sont volontairement séparés : l’interface res
 
 1. Importer la vidéo et renseigner les couleurs principales des maillots.
 2. Importer chaque effectif en CSV (`name,shirt_number,position`).
-3. Lancer l’analyse. Le worker traite d’abord la qualité et propose deux mi-temps.
-4. Confirmer les limites vidéo des mi-temps puis relancer l’analyse pour verrouiller l’horloge match.
-5. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
-6. Valider ou corriger les actions en regardant le clip ou le timecode.
-7. Exporter les événements CSV et le rapport JSON.
+3. Cliquer sur **1. Préparer les mi-temps**, puis vérifier et confirmer leurs limites vidéo.
+4. Lancer **2. Test rapide · 2 min**. Il contrôle quatre séquences continues de 30 secondes et mesure le ballon visible, les joueurs par image, le jeu effectif, l’équilibre des équipes et la fragmentation des pistes. Il ne produit aucune statistique de match.
+5. Ne lancer **3. Analyse complète** que si le diagnostic est validé. Le bouton reste verrouillé si le socle visuel échoue.
+6. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
+7. Valider ou corriger les actions en regardant le clip ou le timecode, puis exporter les résultats.
 
 Un aperçu sans vidéo peut être créé avec :
 

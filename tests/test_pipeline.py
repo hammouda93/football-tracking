@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from collections import Counter
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -173,6 +174,45 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertIn("0.25×", label)
         self.assertIn("reste 5h15", label)
         self.assertIn("YOLO CPU", label)
+
+    def test_sample_uses_two_thirty_second_windows_per_half(self):
+        runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
+        runner.config = {
+            "analysis_mode": "sample",
+            "sample_window_seconds": 30,
+            "sample_windows_per_half": 2,
+        }
+        periods = [
+            SimpleNamespace(number=1, video_start_ms=0, video_end_ms=2_700_000),
+            SimpleNamespace(number=2, video_start_ms=3_300_000, video_end_ms=6_000_000),
+        ]
+
+        windows = runner._tracking_windows(periods)
+
+        self.assertEqual(len(windows), 4)
+        self.assertEqual(sum(item["end_ms"] - item["start_ms"] for item in windows), 120_000)
+        self.assertEqual([item["period"].number for item in windows], [1, 1, 2, 2])
+
+    def test_diagnostics_fail_bad_ball_team_and_track_detection(self):
+        diagnostics = MatchAnalysisRunner._tracking_diagnostics(
+            Counter(
+                {
+                    "frames": 1_200,
+                    "athlete_observations": 14_400,
+                    "ball_visible_frames": 24,
+                    "field_frames": 1_100,
+                    "state_unknown": 1_176,
+                    "state_loose": 24,
+                }
+            ),
+            Counter({"home": 13_900, "away": 500}),
+            track_count=300,
+            tracking_duration_ms=120_000,
+        )
+
+        self.assertEqual(diagnostics["verdict"], "fail")
+        self.assertLess(diagnostics["ball_visibility_pct"], 10)
+        self.assertGreater(diagnostics["tracks_per_minute"], 80)
 
 
 class BallInPlayTests(unittest.TestCase):
