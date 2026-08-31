@@ -16,7 +16,9 @@
     </div>
     <div class="header-actions">
       {% if match.video %}
-        <form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" type="submit">{% if latest_run %}Relancer l’analyse{% else %}Lancer l’analyse{% endif %} <span>▶</span></button></form>
+        <form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-ghost" name="mode" value="prepare" type="submit">1. Préparer les mi-temps</button></form>
+        {% if periods_confirmed %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" name="mode" value="sample" type="submit">2. Test rapide · 2 min <span>▶</span></button></form>{% endif %}
+        {% if sample_ready %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-secondary" name="mode" value="full" type="submit">3. Analyse complète</button></form>{% else %}<button class="button button-secondary" type="button" disabled title="Le test rapide doit réussir">3. Analyse complète verrouillée</button>{% endif %}
       {% endif %}
       <a class="button button-ghost" href="{% url 'match-export-report' match.pk %}">Rapport JSON</a>
       <a class="button button-ghost" href="{% url 'match-export-events' match.pk %}">Événements CSV</a>
@@ -24,16 +26,36 @@
   </section>
 
   <nav class="workspace-tabs" aria-label="Espaces du match">
-    <a href="#lab">Laboratoire</a><a href="#stats">Statistiques</a><a href="#events">Actions</a><a href="#identity">Identités <span>{{ unassigned_track_count }}</span></a><a href="#rosters">Effectifs</a>
+    <a href="#lab">Laboratoire</a>{% if show_match_results %}<a href="#stats">Statistiques</a><a href="#events">Actions</a><a href="#identity">Identités <span>{{ unassigned_track_count }}</span></a>{% endif %}<a href="#rosters">Effectifs</a>
   </nav>
 
   {% if latest_run %}
     <section class="analysis-banner status-{{ latest_run.status|status_class }}" data-analysis-status="{% url 'analysis-status' latest_run.pk %}" data-terminal="{% if latest_run.status == 'completed' or latest_run.status == 'review' or latest_run.status == 'failed' or latest_run.status == 'cancelled' %}true{% else %}false{% endif %}">
       <div class="analysis-orb"><span></span></div>
-      <div class="analysis-copy"><small>Dernière analyse · {{ latest_run.created_at|date:"d/m H:i" }}</small><strong data-stage-label>{{ latest_run.get_current_stage_display }}</strong><span class="analysis-detail" data-progress-detail>{% if latest_run.current_stage == 'tracking' %}{{ latest_run.metrics.live_progress.label }}{% endif %}</span><div class="progress-track"><i data-progress-bar style="width: {{ latest_run.progress }}%"></i></div></div>
+      <div class="analysis-copy"><small>{% if latest_mode == 'sample' %}Test rapide{% elif latest_mode == 'prepare' %}Préparation{% else %}Analyse complète{% endif %} · {{ latest_run.created_at|date:"d/m H:i" }}</small><strong data-stage-label>{{ latest_stage_label }}</strong><span class="analysis-detail" data-progress-detail>{% if latest_run.current_stage == 'tracking' %}{{ latest_run.metrics.live_progress.label }}{% endif %}</span><div class="progress-track"><i data-progress-bar style="width: {{ latest_run.progress }}%"></i></div></div>
       <div class="analysis-value"><strong data-progress-value>{{ latest_run.progress }}%</strong><span data-status-label>{{ latest_run.get_status_display }}</span></div>
       {% if latest_run.status == 'queued' or latest_run.status == 'processing' %}<form method="post" action="{% url 'analysis-cancel' latest_run.pk %}">{% csrf_token %}<button class="button button-danger button-small">Arrêter</button></form>{% endif %}
       {% if latest_run.error_message %}<p class="analysis-error" data-analysis-error>{{ latest_run.error_message }}</p>{% endif %}
+    </section>
+  {% endif %}
+
+  {% if latest_mode == 'sample' and sample_diagnostics %}
+    <section class="panel sample-diagnostic verdict-{{ sample_diagnostics.verdict }}">
+      <div class="panel-heading"><div><p class="eyebrow">Validation avant calcul complet</p><h2>Résultat du test rapide</h2></div><span class="sample-verdict">{% if sample_diagnostics.verdict == 'pass' %}VALIDÉ{% elif sample_diagnostics.verdict == 'warning' %}À CONTRÔLER{% else %}ÉCHEC{% endif %}</span></div>
+      <div class="diagnostic-grid">
+        <div><strong>{{ sample_diagnostics.duration_seconds|floatformat:0 }} s</strong><small>vidéo testée</small></div>
+        <div><strong>{{ sample_diagnostics.frames_analyzed }}</strong><small>images analysées</small></div>
+        <div><strong>{{ sample_diagnostics.average_athletes_per_frame|floatformat:1 }}</strong><small>joueurs / image</small></div>
+        <div><strong>{{ sample_diagnostics.ball_visibility_pct|floatformat:1 }}%</strong><small>ballon visible</small></div>
+        <div><strong>{{ sample_diagnostics.playable_candidate_pct|floatformat:1 }}%</strong><small>jeu effectif candidat</small></div>
+        <div><strong>{{ sample_diagnostics.tracks_per_minute|floatformat:1 }}</strong><small>pistes / minute</small></div>
+        <div><strong>{{ sample_diagnostics.home_team_share_pct|floatformat:1 }}%</strong><small>{{ match.home_team.short_name }}</small></div>
+        <div><strong>{{ sample_diagnostics.away_team_share_pct|floatformat:1 }}%</strong><small>{{ match.away_team.short_name }}</small></div>
+      </div>
+      {% if sample_previews %}<div class="sample-preview-grid">{% for preview in sample_previews %}<figure><a href="{{ preview.url }}" target="_blank"><img src="{{ preview.url }}" alt="Aperçu annoté MT{{ preview.period }} séquence {{ preview.window }}"></a><figcaption>MT{{ preview.period }} · {{ preview.video_time_ms|timecode }}</figcaption></figure>{% endfor %}</div>{% endif %}
+      {% if sample_diagnostics.issues %}<ul class="diagnostic-issues">{% for issue in sample_diagnostics.issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% endif %}
+      <div class="sample-windows"><strong>Séquences contrôlées :</strong>{% for window in sample_windows %}<button class="timecode-button" data-video-ms="{{ window.start_ms }}">MT{{ window.period }} · {{ window.start_ms|timecode }} ▶</button>{% endfor %}</div>
+      <p class="diagnostic-note">Ce test ne crée ni tirs, ni passes, ni statistiques de match. Il vérifie seulement que la base visuelle est assez fiable avant plusieurs heures de calcul.</p>
     </section>
   {% endif %}
 
@@ -61,9 +83,9 @@
         <div class="panel-heading"><div><p class="eyebrow">Double horloge</p><h2>Mi-temps</h2></div><span class="info-dot" title="Temps vidéo → temps de match">i</span></div>
         {% if periods|length == 2 %}
           <form method="post" action="{% url 'match-update-periods' match.pk %}">{% csrf_token %}
-            <div class="period-row"><span>1</span><div><strong>1re mi-temps</strong><small>Début vidéo</small><input name="p1_start" value="{{ periods.0.video_start_ms|timecode }}"><small>Fin vidéo</small><input name="p1_end" value="{{ periods.0.video_end_ms|timecode }}"></div><em class="confidence">{{ periods.0.confidence|percent }}</em></div>
+            <div class="period-row"><span>1</span><div><strong>1re mi-temps</strong><small>Début vidéo</small><input name="p1_start" value="{{ periods.0.video_start_ms|timecode }}"><small>Fin vidéo</small><input name="p1_end" value="{{ periods.0.video_end_ms|timecode }}"></div><em class="confidence">{{ periods.0.confidence|ratio_percent }}</em></div>
             <div class="halftime-marker"><i></i><span>Mi-temps exclue</span><i></i></div>
-            <div class="period-row"><span>2</span><div><strong>2e mi-temps</strong><small>Début vidéo</small><input name="p2_start" value="{{ periods.1.video_start_ms|timecode }}"><small>Fin vidéo</small><input name="p2_end" value="{{ periods.1.video_end_ms|timecode }}"></div><em class="confidence">{{ periods.1.confidence|percent }}</em></div>
+            <div class="period-row"><span>2</span><div><strong>2e mi-temps</strong><small>Début vidéo</small><input name="p2_start" value="{{ periods.1.video_start_ms|timecode }}"><small>Fin vidéo</small><input name="p2_end" value="{{ periods.1.video_end_ms|timecode }}"></div><em class="confidence">{{ periods.1.confidence|ratio_percent }}</em></div>
             <button class="button button-secondary full-width" type="submit">Confirmer les limites</button>
           </form>
         {% else %}<p class="muted">Lancez l’analyse pour obtenir une proposition automatique des deux mi-temps.</p>{% endif %}
@@ -71,7 +93,7 @@
     </aside>
   </section>
 
-  <section id="stats" class="section-block">
+  {% if show_match_results %}<section id="stats" class="section-block">
     <div class="section-heading"><div><p class="eyebrow">Vue collective</p><h2>Comparaison des équipes</h2></div><span class="section-note">Calculée sur les séquences en jeu</span></div>
     <div class="panel stats-comparison">
       <div class="comparison-head"><span style="--team: {{ match.home_team.primary_color }}"><i></i>{{ match.home_team.name }}</span><strong>Indicateur</strong><span class="away" style="--team: {{ match.away_team.primary_color }}">{{ match.away_team.name }}<i></i></span></div>
@@ -110,7 +132,7 @@
               <td>{% if event.team %}<span class="team-label"><i style="background: {{ event.team.primary_color }}"></i>{{ event.team.short_name }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
               <td><strong>{{ event.player.name|default:event.actor_track.track_uid|default:"Non identifié" }}</strong>{% if event.recipient or event.recipient_track %}<span class="recipient">→ {{ event.recipient.name|default:event.recipient_track.track_uid }}</span>{% endif %}</td>
               <td><span class="outcome outcome-{{ event.outcome }}">{{ event.get_outcome_display }}</span></td>
-              <td><div class="confidence-cell"><span>{{ event.confidence|percent }}</span><i><em style="width: {{ event.confidence|percentage_width }}%"></em></i></div></td>
+              <td><div class="confidence-cell"><span>{{ event.confidence|ratio_percent }}</span><i><em style="width: {{ event.confidence|percentage_width }}%"></em></i></div></td>
               <td>
                 <div class="review-actions">
                   <span class="status status-{{ event.review_status|status_class }}">{{ event.get_review_status_display }}</span>
@@ -133,7 +155,7 @@
         {% for track in tracks %}
           <form class="track-card {% if track.player %}assigned{% endif %}" method="post" action="{% url 'track-assign' track.pk %}">{% csrf_token %}
             <div class="track-preview" style="--team: {{ track.team.primary_color|default:'#667085' }}"><span>{{ track.predicted_shirt_number|default:"?" }}</span><i></i></div>
-            <div class="track-info"><strong>{{ track.track_uid }}</strong><small>{{ track.team.name|default:"Équipe inconnue" }} · {{ track.video_start_ms|timecode }}–{{ track.video_end_ms|timecode }}</small><span>{{ track.identity_confidence|percent }} confiance · {{ track.metadata.samples }} observations</span></div>
+            <div class="track-info"><strong>{{ track.track_uid }}</strong><small>{{ track.team.name|default:"Équipe inconnue" }} · {{ track.video_start_ms|timecode }}–{{ track.video_end_ms|timecode }}</small><span>{{ track.identity_confidence|ratio_percent }} confiance · {{ track.metadata.samples }} observations</span></div>
             <select name="player_id"><option value="">Non attribué</option>{% if track.team_id == match.home_team_id or not track.team_id %}{% for player in home_players %}<option value="{{ player.pk }}" {% if track.player_id == player.pk %}selected{% endif %}>{{ match.home_team.short_name }} · {{ player }}</option>{% endfor %}{% endif %}{% if track.team_id == match.away_team_id or not track.team_id %}{% for player in away_players %}<option value="{{ player.pk }}" {% if track.player_id == player.pk %}selected{% endif %}>{{ match.away_team.short_name }} · {{ player }}</option>{% endfor %}{% endif %}</select>
             <button class="button button-secondary button-small">Appliquer</button>
           </form>
@@ -141,6 +163,7 @@
       </div>
     </div>
   </section>
+  {% endif %}
 
   <section id="rosters" class="section-block">
     <div class="section-heading"><div><p class="eyebrow">Référentiel</p><h2>Effectifs du match</h2></div><span class="section-note">CSV : name, shirt_number, position</span></div>

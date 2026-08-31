@@ -27,6 +27,24 @@ from .models import (
 from .services import create_match_from_upload, import_roster_csv, parse_timecode
 
 
+def _run_mode(run: AnalysisRun | None) -> str:
+    if run is None:
+        return ""
+    mode = str((run.config or {}).get("analysis_mode", "full"))
+    return mode if mode in {"prepare", "sample", "full"} else "full"
+
+
+def _passing_sample_run(match: Match) -> AnalysisRun | None:
+    for run in match.analysis_runs.all()[:25]:
+        if _run_mode(run) != "sample":
+            continue
+        diagnostics = (run.metrics or {}).get("diagnostics") or {}
+        terminal = run.status in {AnalysisRun.Status.REVIEW, AnalysisRun.Status.COMPLETED}
+        if terminal and diagnostics.get("verdict") == "pass":
+            return run
+    return None
+
+
 def dashboard(request: HttpRequest) -> HttpResponse:
     matches = (
         Match.objects.select_related("home_team", "away_team")
@@ -63,6 +81,7 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
         pk=pk,
     )
     latest_run = match.analysis_runs.first()
+    latest_mode = _run_mode(latest_run)
     events = match.events.select_related(
         "period", "team", "player", "recipient", "actor_track", "recipient_track"
     )
@@ -79,11 +98,28 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
         events = events.filter(team_id=team_id)
 
     periods = list(match.periods.all())
-    team_stats = {
-        stat.team_id: stat
-        for stat in TeamMatchStat.objects.filter(match=match).select_related("team")
-    }
-    player_stats = PlayerMatchStat.objects.filter(match=match).select_related("player", "player__team")
+    show_match_results = (
+        latest_run is not None
+        and latest_mode == "full"
+        and latest_run.status in {AnalysisRun.Status.REVIEW, AnalysisRun.Status.COMPLETED}
+    )
+    team_stats = (
+        {
+            stat.team_id: stat
+            for stat in TeamMatchStat.objects.filter(
+                match=match, analysis_run=latest_run
+            ).select_related("team")
+        }
+        if show_match_results
+        else {}
+    )
+    player_stats = (
+        PlayerMatchStat.objects.filter(match=match, analysis_run=latest_run).select_related(
+            "player", "player__team"
+        )
+        if show_match_results
+        else PlayerMatchStat.objects.none()
+    )
     tracks = (
         Track.objects.filter(analysis_run=latest_run)
         .select_related("team", "player")
@@ -95,6 +131,28 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
         "match": match,
         "periods": periods,
         "latest_run": latest_run,
+        "latest_mode": latest_mode,
+        "latest_stage_label": (
+            "Test joueurs, ballon et jeu effectif"
+            if latest_run
+            and latest_mode == "sample"
+            and latest_run.current_stage == AnalysisRun.Stage.TRACKING
+            else (latest_run.get_current_stage_display() if latest_run else "")
+        ),
+        "sample_diagnostics": (
+            (latest_run.metrics or {}).get("diagnostics") or {}
+            if latest_mode == "sample"
+            else {}
+        ),
+        "sample_windows": (
+            (latest_run.metrics or {}).get("windows") or [] if latest_mode == "sample" else []
+        ),
+        "sample_previews": (
+            (latest_run.metrics or {}).get("previews") or [] if latest_mode == "sample" else []
+        ),
+        "periods_confirmed": len(periods) == 2 and all(period.confirmed for period in periods),
+        "sample_ready": _passing_sample_run(match) is not None,
+        "show_match_results": show_match_results,
         "events": events[:500],
         "event_types": Event.Type.choices,
         "review_statuses": Event.ReviewStatus.choices,
@@ -122,9 +180,28 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
         messages.info(request, "Une analyse est déjà en attente ou en cours.")
         return redirect(match)
 
+    mode = request.POST.get("mode", "sample")
+    if mode not in {"prepare", "sample", "full"}:
+        messages.error(request, "Mode d’analyse invalide.")
+        return redirect(match)
+    confirmed_periods = list(match.periods.filter(confirmed=True).order_by("number"))
+    if mode in {"sample", "full"} and len(confirmed_periods) != 2:
+        messages.warning(
+            request,
+            "Confirme d’abord les limites des deux mi-temps avant de lancer ce test.",
+        )
+        return redirect(match)
+    if mode == "full" and _passing_sample_run(match) is None:
+        messages.warning(
+            request,
+            "L’analyse complète est bloquée tant que le test rapide n’est pas validé.",
+        )
+        return redirect(match)
+
     run = AnalysisRun.objects.create(
         match=match,
         config={
+            "analysis_mode": mode,
             "backend": settings.ANALYSIS_BACKEND,
             "device": settings.ANALYSIS_DEVICE,
             "sample_seconds": settings.ANALYSIS_SAMPLE_SECONDS,
@@ -133,12 +210,19 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_model_path": settings.YOLO_MODEL_PATH,
             "yolo_confidence": settings.YOLO_CONFIDENCE,
             "yolo_image_size": settings.YOLO_IMAGE_SIZE,
-            "render_clips": True,
+            "sample_window_seconds": 30,
+            "sample_windows_per_half": 2,
+            "render_clips": mode == "full",
         },
     )
     match.status = Match.Status.QUEUED
     match.save(update_fields=["status", "updated_at"])
-    messages.success(request, f"Analyse {str(run.pk)[:8]} mise en file.")
+    labels = {
+        "prepare": "Préparation des mi-temps",
+        "sample": "Test rapide de 2 minutes",
+        "full": "Analyse complète",
+    }
+    messages.success(request, f"{labels[mode]} · {str(run.pk)[:8]} mis en file.")
     return redirect(match)
 
 
@@ -146,13 +230,16 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
 def analysis_status(request: HttpRequest, pk) -> JsonResponse:
     run = get_object_or_404(AnalysisRun.objects.select_related("match"), pk=pk)
     live_progress = (run.metrics or {}).get("live_progress") or {}
+    stage_label = run.get_current_stage_display()
+    if _run_mode(run) == "sample" and run.current_stage == AnalysisRun.Stage.TRACKING:
+        stage_label = "Test joueurs, ballon et jeu effectif"
     return JsonResponse(
         {
             "id": str(run.pk),
             "status": run.status,
             "status_label": run.get_status_display(),
             "stage": run.current_stage,
-            "stage_label": run.get_current_stage_display(),
+            "stage_label": stage_label,
             "progress": run.progress,
             "error": run.error_message,
             "match_status": run.match.status,

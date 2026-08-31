@@ -108,6 +108,11 @@ class MatchAnalysisRunner:
             metadata = self._probe()
             quality = self._quality(metadata)
             periods = self._periods(quality.signals, metadata.duration_ms)
+            if self.analysis_mode == "prepare":
+                result = self._empty_result()
+                report = self._report(metadata, quality, periods, result, self._empty_clips())
+                self._finish(periods, quality, result, report)
+                return self.run
             result = self._track(periods, metadata)
             persisted = self._persist(periods, result)
             clips = self._clips(metadata, persisted["events"], result["events"])
@@ -120,6 +125,36 @@ class MatchAnalysisRunner:
             self._fail(exc)
             raise
         return self.run
+
+    @property
+    def analysis_mode(self) -> str:
+        mode = str(self.config.get("analysis_mode", "full"))
+        return mode if mode in {"prepare", "sample", "full"} else "full"
+
+    def _empty_result(self) -> dict:
+        return {
+            "analysis_mode": self.analysis_mode,
+            "backend": str(self.config.get("backend", "heuristic")),
+            "tracking_fps": 0.0,
+            "samples": [],
+            "spans": [],
+            "events": [],
+            "tracks": {},
+            "camera": {
+                "frames": 0,
+                "reliable_frames": 0,
+                "resets": 0,
+                "mean_inlier_ratio": 0.0,
+                "reliable_ratio": 0.0,
+            },
+            "windows": [],
+            "diagnostics": {},
+            "previews": [],
+        }
+
+    @staticmethod
+    def _empty_clips() -> dict:
+        return {"enabled": False, "planned": 0, "rendered": 0, "errors": []}
 
     def _begin(self) -> None:
         self.run.status = AnalysisRun.Status.PROCESSING
@@ -225,17 +260,17 @@ class MatchAnalysisRunner:
         backend = str(self.config.get("backend", "heuristic"))
         device = str(self.config.get("device", "cpu"))
         tracking_fps = max(0.5, float(self.config.get("tracking_fps", 10.0)))
-        period_duration = sum(
-            max(0, period.video_end_ms - period.video_start_ms) for period in periods
-        )
-        estimated_frames = math.ceil(period_duration / 1000.0 * tracking_fps)
+        windows = self._tracking_windows(periods)
+        tracking_duration = sum(window["end_ms"] - window["start_ms"] for window in windows)
+        estimated_frames = math.ceil(tracking_duration / 1000.0 * tracking_fps)
+        operation = "Test rapide" if self.analysis_mode == "sample" else "Tracking"
         self._save_live_progress(
             22,
             {
                 "stage": "tracking",
                 "stage_progress": 0.0,
                 "processed_video_ms": 0,
-                "total_video_ms": period_duration,
+                "total_video_ms": tracking_duration,
                 "frames_processed": 0,
                 "frames_total_estimate": estimated_frames,
                 "elapsed_seconds": 0,
@@ -249,12 +284,13 @@ class MatchAnalysisRunner:
                     device=device,
                     stage_progress=0.0,
                     processed_ms=0,
-                    total_ms=period_duration,
+                    total_ms=tracking_duration,
                     frames_processed=0,
                     frames_total=estimated_frames,
                     speed_x=0.0,
                     eta_seconds=None,
                     initializing=True,
+                    operation=operation,
                 ),
             },
         )
@@ -284,22 +320,31 @@ class MatchAnalysisRunner:
             "mean_inlier_ratio": 0.0,
         }
         camera_inliers: list[float] = []
+        diagnostic_counts: Counter = Counter()
+        team_observations: Counter = Counter()
+        preview_artifacts: list[dict] = []
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
+            temp_path = Path(temp_dir)
             tracking_path = Path(temp_dir) / "tracking.ndjson"
             with tracking_path.open("w", encoding="utf-8") as tracking_file:
-                for period in periods:
+                for window in windows:
                     self._check_cancelled()
+                    period = window["period"]
+                    window_start_ms = window["start_ms"]
+                    window_end_ms = window["end_ms"]
                     provider.reset()
                     camera = CameraStabilizer()
                     projector = self._projector(period)
                     ball_engine = BallInPlayEngine()
                     period_samples: list[PossessionSample] = []
-                    period_prefix = f"p{period.number}-"
+                    period_prefix = f"p{period.number}-w{window['index']}-"
+                    preview_saved = False
+                    preview_target_ms = window_start_ms + (window_end_ms - window_start_ms) // 2
                     for timestamp_ms, frame in iter_frames(
                         metadata.path,
-                        start_ms=period.video_start_ms,
-                        end_ms=period.video_end_ms,
+                        start_ms=window_start_ms,
+                        end_ms=window_end_ms,
                         target_fps=tracking_fps,
                     ):
                         analysis = provider.analyze_frame(frame, timestamp_ms)
@@ -320,10 +365,52 @@ class MatchAnalysisRunner:
                         sample = ball_engine.observe(analysis)
                         period_samples.append(sample)
                         all_samples.append((period, sample))
+                        diagnostic_counts["frames"] += 1
+                        diagnostic_counts["athlete_observations"] += len(analysis.athletes)
+                        diagnostic_counts["ball_visible_frames"] += int(analysis.ball is not None)
+                        diagnostic_counts["field_frames"] += int(
+                            analysis.field_score >= 0.14
+                            and not analysis.scene_cut
+                            and analysis.replay_probability < 0.65
+                        )
+                        diagnostic_counts[f"state_{str(sample.state)}"] += 1
+                        for athlete in analysis.athletes:
+                            team_observations[athlete.team_key or "unknown"] += 1
+                        if (
+                            self.analysis_mode == "sample"
+                            and not preview_saved
+                            and timestamp_ms >= preview_target_ms
+                        ):
+                            preview_path = temp_path / (
+                                f"sample-p{period.number}-w{window['index']}.jpg"
+                            )
+                            self._write_sample_preview(frame, analysis, preview_path)
+                            artifact = _save_local_artifact(
+                                self.run,
+                                AnalysisArtifact.Kind.ANNOTATED_VIDEO,
+                                f"sample-{self.run.pk}-p{period.number}-w{window['index']}.jpg",
+                                preview_path,
+                                metadata={
+                                    "artifact_type": "sample_preview",
+                                    "period": period.number,
+                                    "window": window["index"],
+                                    "video_time_ms": timestamp_ms,
+                                },
+                            )
+                            preview_artifacts.append(
+                                {
+                                    "url": artifact.file.url,
+                                    "period": period.number,
+                                    "window": window["index"],
+                                    "video_time_ms": timestamp_ms,
+                                }
+                            )
+                            preview_saved = True
                         tracking_file.write(
                             json.dumps(
                                 {
                                     "period": period.number,
+                                    "window": window["index"],
                                     "match_time_ms": self._match_time(period, timestamp_ms),
                                     "frame": analysis.to_dict(),
                                     "possession": sample.to_dict(),
@@ -333,10 +420,10 @@ class MatchAnalysisRunner:
                             )
                             + "\n"
                         )
-                        current_processed = processed_ms + timestamp_ms - period.video_start_ms
-                        current_processed = max(0, min(period_duration, current_processed))
+                        current_processed = processed_ms + timestamp_ms - window_start_ms
+                        current_processed = max(0, min(tracking_duration, current_processed))
                         now = time.monotonic()
-                        progress_ratio = current_processed / max(period_duration, 1)
+                        progress_ratio = current_processed / max(tracking_duration, 1)
                         percent = min(68, 22 + int(46 * progress_ratio))
                         if now - last_live_update >= 2.0 or percent != self.last_progress:
                             elapsed_seconds = max(0.001, now - tracking_started_at)
@@ -344,7 +431,7 @@ class MatchAnalysisRunner:
                             speed_x = processed_seconds / elapsed_seconds
                             remaining_seconds = max(
                                 0.0,
-                                (period_duration - current_processed) / 1000.0,
+                                (tracking_duration - current_processed) / 1000.0,
                             )
                             eta_seconds = (
                                 remaining_seconds / speed_x if speed_x > 0.0001 else None
@@ -353,7 +440,7 @@ class MatchAnalysisRunner:
                                 "stage": "tracking",
                                 "stage_progress": round(progress_ratio * 100.0, 2),
                                 "processed_video_ms": current_processed,
-                                "total_video_ms": period_duration,
+                                "total_video_ms": tracking_duration,
                                 "frames_processed": frames_processed,
                                 "frames_total_estimate": estimated_frames,
                                 "elapsed_seconds": round(elapsed_seconds, 1),
@@ -368,24 +455,26 @@ class MatchAnalysisRunner:
                                 device=device,
                                 stage_progress=detail["stage_progress"],
                                 processed_ms=current_processed,
-                                total_ms=period_duration,
+                                total_ms=tracking_duration,
                                 frames_processed=frames_processed,
                                 frames_total=estimated_frames,
                                 speed_x=speed_x,
                                 eta_seconds=eta_seconds,
+                                operation=operation,
                             )
                             self._save_live_progress(percent, detail)
                             last_live_update = now
-                    processed_ms += max(0, period.video_end_ms - period.video_start_ms)
+                    processed_ms += max(0, window_end_ms - window_start_ms)
                     spans = ball_engine.compress(
                         period_samples,
                         max_gap_ms=max(1_000, int(2_500 / tracking_fps)),
                     )
                     for span in spans:
-                        span.end_ms = min(period.video_end_ms, span.end_ms)
+                        span.end_ms = min(window_end_ms, span.end_ms)
                     all_spans.extend((period, span) for span in spans)
-                    candidates = EventEngine().detect(period_samples)
-                    all_events.extend((period, candidate) for candidate in candidates)
+                    if self.analysis_mode == "full":
+                        candidates = EventEngine().detect(period_samples)
+                        all_events.extend((period, candidate) for candidate in candidates)
 
             _save_local_artifact(
                 self.run,
@@ -396,6 +485,8 @@ class MatchAnalysisRunner:
                     "backend": backend,
                     "tracking_fps": tracking_fps,
                     "coordinate_systems": ["image_normalized", "pitch_meters"],
+                    "analysis_mode": self.analysis_mode,
+                    "windows": [self._window_payload(window) for window in windows],
                 },
             )
 
@@ -411,7 +502,14 @@ class MatchAnalysisRunner:
             f"camera-{self.run.pk}.json",
             camera_summary,
         )
+        diagnostics = self._tracking_diagnostics(
+            diagnostic_counts,
+            team_observations,
+            track_count=len(track_summaries),
+            tracking_duration_ms=tracking_duration,
+        )
         return {
+            "analysis_mode": self.analysis_mode,
             "backend": backend,
             "tracking_fps": tracking_fps,
             "samples": all_samples,
@@ -419,7 +517,165 @@ class MatchAnalysisRunner:
             "events": all_events,
             "tracks": track_summaries,
             "camera": camera_summary,
+            "windows": [self._window_payload(window) for window in windows],
+            "diagnostics": diagnostics,
+            "previews": preview_artifacts,
         }
+
+    @staticmethod
+    def _write_sample_preview(frame, analysis: FrameAnalysis, output_path: Path) -> None:
+        import cv2
+
+        preview = frame.copy()
+        colors = {
+            "home": (70, 220, 120),
+            "away": (70, 130, 255),
+            "unknown": (190, 190, 190),
+            "ball": (255, 255, 255),
+        }
+        for obj in analysis.objects:
+            x1, y1, x2, y2 = (int(value) for value in obj.bbox_xyxy)
+            is_ball = obj.role == ObjectRole.BALL
+            color = (
+                colors["ball"]
+                if is_ball
+                else colors.get(obj.team_key or "unknown", colors["unknown"])
+            )
+            cv2.rectangle(preview, (x1, y1), (x2, y2), color, 3 if is_ball else 2)
+            label = "BALL" if is_ball else f"{obj.team_key or 'unknown'} {obj.track_id}"
+            cv2.putText(
+                preview,
+                label,
+                (x1, max(18, y1 - 7)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+        max_width = 1280
+        if preview.shape[1] > max_width:
+            scale = max_width / preview.shape[1]
+            preview = cv2.resize(preview, None, fx=scale, fy=scale)
+        if not cv2.imwrite(str(output_path), preview):
+            raise RuntimeError("Impossible d’écrire l’aperçu annoté du test rapide.")
+
+    def _tracking_windows(self, periods: list[MatchPeriod]) -> list[dict]:
+        if self.analysis_mode != "sample":
+            return [
+                {
+                    "period": period,
+                    "index": 1,
+                    "start_ms": period.video_start_ms,
+                    "end_ms": period.video_end_ms,
+                }
+                for period in periods
+            ]
+
+        window_ms = max(
+            10_000,
+            int(float(self.config.get("sample_window_seconds", 30)) * 1_000),
+        )
+        windows_per_half = max(
+            1,
+            min(3, int(self.config.get("sample_windows_per_half", 2))),
+        )
+        positions = (
+            [0.50]
+            if windows_per_half == 1
+            else ([0.25, 0.70] if windows_per_half == 2 else [0.18, 0.50, 0.78])
+        )
+        windows: list[dict] = []
+        for period in periods:
+            duration_ms = max(0, period.video_end_ms - period.video_start_ms)
+            bounded_window_ms = min(window_ms, duration_ms)
+            available_ms = max(0, duration_ms - bounded_window_ms)
+            for index, position in enumerate(positions, start=1):
+                start_ms = period.video_start_ms + int(available_ms * position)
+                windows.append(
+                    {
+                        "period": period,
+                        "index": index,
+                        "start_ms": start_ms,
+                        "end_ms": start_ms + bounded_window_ms,
+                    }
+                )
+        return windows
+
+    @staticmethod
+    def _window_payload(window: dict) -> dict:
+        return {
+            "period": window["period"].number,
+            "index": window["index"],
+            "start_ms": window["start_ms"],
+            "end_ms": window["end_ms"],
+            "duration_ms": max(0, window["end_ms"] - window["start_ms"]),
+        }
+
+    @staticmethod
+    def _tracking_diagnostics(
+        counts: Counter,
+        team_observations: Counter,
+        *,
+        track_count: int,
+        tracking_duration_ms: int,
+    ) -> dict:
+        frames = max(int(counts["frames"]), 0)
+        duration_minutes = max(tracking_duration_ms / 60_000, 1 / 60)
+        known_team_observations = int(team_observations["home"] + team_observations["away"])
+        home_share_pct = (
+            100.0 * team_observations["home"] / known_team_observations
+            if known_team_observations
+            else 0.0
+        )
+        away_share_pct = (
+            100.0 * team_observations["away"] / known_team_observations
+            if known_team_observations
+            else 0.0
+        )
+        playable_frames = sum(
+            int(counts[f"state_{state}"])
+            for state in ("controlled", "contested", "loose")
+        )
+        diagnostics = {
+            "frames_analyzed": frames,
+            "duration_seconds": round(tracking_duration_ms / 1_000, 1),
+            "average_athletes_per_frame": round(
+                counts["athlete_observations"] / max(frames, 1), 2
+            ),
+            "ball_visibility_pct": round(
+                100.0 * counts["ball_visible_frames"] / max(frames, 1), 2
+            ),
+            "field_live_pct": round(100.0 * counts["field_frames"] / max(frames, 1), 2),
+            "playable_candidate_pct": round(100.0 * playable_frames / max(frames, 1), 2),
+            "tracks": track_count,
+            "tracks_per_minute": round(track_count / duration_minutes, 2),
+            "home_team_share_pct": round(home_share_pct, 2),
+            "away_team_share_pct": round(away_share_pct, 2),
+            "unknown_team_observations": int(team_observations["unknown"]),
+            "issues": [],
+        }
+        failures: list[str] = []
+        warnings: list[str] = []
+        if frames < 50:
+            failures.append("Trop peu d’images ont été analysées.")
+        if diagnostics["average_athletes_per_frame"] < 6:
+            failures.append("Moins de 6 joueurs sont détectés en moyenne par image.")
+        if diagnostics["ball_visibility_pct"] < 10:
+            failures.append("Le ballon est visible sur moins de 10 % des images.")
+        if diagnostics["playable_candidate_pct"] < 10:
+            failures.append("Le jeu effectif est reconnu sur moins de 10 % des images.")
+        if known_team_observations < max(50, frames):
+            warnings.append("Pas assez de joueurs ont une équipe reconnue.")
+        elif min(home_share_pct, away_share_pct) < 15:
+            failures.append("La séparation des deux équipes est fortement déséquilibrée.")
+        if diagnostics["tracks_per_minute"] > 80:
+            failures.append("Les identités de piste se fragmentent beaucoup trop vite.")
+        elif diagnostics["tracks_per_minute"] > 50:
+            warnings.append("La continuité des pistes est encore fragile.")
+        diagnostics["issues"] = failures + warnings
+        diagnostics["verdict"] = "fail" if failures else ("warning" if warnings else "pass")
+        return diagnostics
 
     def _save_live_progress(self, progress: int, detail: dict) -> None:
         self._check_cancelled()
@@ -445,18 +701,21 @@ class MatchAnalysisRunner:
         speed_x: float,
         eta_seconds: float | None,
         initializing: bool = False,
+        operation: str = "Tracking",
     ) -> str:
         engine = backend.upper()
         if backend == "yolo":
             engine = f"YOLO {device.upper()}"
         if initializing:
-            return f"Initialisation {engine} · {frames_total:,} images prévues".replace(",", " ")
+            return (
+                f"{operation} · initialisation {engine} · {frames_total:,} images prévues"
+            ).replace(",", " ")
         eta = "ETA en calcul"
         if eta_seconds is not None:
             eta = f"reste {cls._duration_label(eta_seconds)}"
         frames = f"{frames_processed:,}/{frames_total:,}".replace(",", " ")
         return (
-            f"Tracking {stage_progress:.1f}% · vidéo {cls._duration_label(processed_ms / 1000)}"
+            f"{operation} {stage_progress:.1f}% · vidéo {cls._duration_label(processed_ms / 1000)}"
             f"/{cls._duration_label(total_ms / 1000)} · {frames} images · "
             f"{speed_x:.2f}× · {eta} · {engine}"
         )
@@ -638,7 +897,10 @@ class MatchAnalysisRunner:
             [candidate.to_dict() | {"period": period.number} for period, candidate in result["events"]],
             metadata={"event_count": len(events)},
         )
-        self._stats(result)
+        if self.analysis_mode == "full":
+            self._stats(result)
+        else:
+            self._stage(AnalysisRun.Stage.STATS, 82)
         return {"tracks": track_by_uid, "events": saved_events}
 
     def _stats(self, result: dict) -> None:
@@ -749,12 +1011,16 @@ class MatchAnalysisRunner:
             "schema": "football-tracking/0.1",
             "run_id": str(self.run.pk),
             "match_id": str(self.match.pk),
+            "analysis_mode": self.analysis_mode,
             "video": metadata.to_dict(),
             "quality": {"score": quality.score, "grade": quality.grade, **quality.metrics},
             "periods": [self._period_payload(period) for period in periods],
             "backend": result["backend"],
             "tracking_fps": result["tracking_fps"],
             "camera": result["camera"],
+            "windows": result.get("windows", []),
+            "diagnostics": result.get("diagnostics", {}),
+            "previews": result.get("previews", []),
             "counts": {
                 "tracks": len(result["tracks"]),
                 "possession_spans": len(result["spans"]),
@@ -773,7 +1039,8 @@ class MatchAnalysisRunner:
 
     def _finish(self, periods, quality, result, report) -> None:
         requires_review = (
-            result["backend"] == "heuristic"
+            self.analysis_mode != "full"
+            or result["backend"] == "heuristic"
             or quality.grade in {"C", "reject"}
             or not all(period.confirmed for period in periods)
             or Event.objects.filter(
