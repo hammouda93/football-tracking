@@ -457,7 +457,6 @@ class VideoSamplingTests(unittest.TestCase):
 
     def test_team_label_uses_the_track_majority_instead_of_one_frame(self):
         provider = YoloVisionProvider.__new__(YoloVisionProvider)
-        provider.team_colors = {"home": object(), "away": object()}
         provider.team_votes = {}
 
         for _ in range(8):
@@ -467,16 +466,12 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(result, "home")
 
-    def test_team_colors_are_learned_from_jerseys_then_mapped_to_clubs(self):
+    def test_team_colors_are_learned_from_video_without_imported_club_colors(self):
         import cv2
         import numpy as np
 
         provider = YoloVisionProvider.__new__(YoloVisionProvider)
-        provider.team_colors = {"home": object(), "away": object()}
-        provider.team_reference_features = {
-            "home": provider._hex_to_team_feature("#A54840"),
-            "away": provider._hex_to_team_feature("#F3F2F8"),
-        }
+        provider.home_team_cluster = "B"
         provider.team_color_samples = []
         provider.team_cluster_centers = None
         provider.team_cluster_mapping = {}
@@ -495,7 +490,10 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(provider._classify_team(frame, home_box), "home")
         self.assertEqual(provider._classify_team(frame, away_box), "away")
-        self.assertEqual(provider.team_calibration_diagnostics()["status"], "ready")
+        diagnostics = provider.team_calibration_diagnostics()
+        self.assertEqual(diagnostics["status"], "ready")
+        self.assertEqual(diagnostics["source"], "video_only")
+        self.assertEqual(diagnostics["home_group"], "B")
 
     def test_native_live_window_draws_without_changing_analysis(self):
         import numpy as np

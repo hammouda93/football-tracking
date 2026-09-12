@@ -14,7 +14,9 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 - Compensation pan/tilt/zoom par ORB, RANSAC et homographies par plan caméra.
 - Projection métrique 105 × 68 m lorsque quatre points terrain ou plus sont fournis.
 - Backend YOLO + BoT-SORT (compensation du mouvement caméra) pour joueurs, gardiens, arbitres et ballon ; ByteTrack reste disponible comme référence.
-- Classement des équipes par couleur de maillot avec vote sur toute la piste.
+- Deux groupes de maillots appris automatiquement dans la vidéo par K-means,
+  sans utiliser les couleurs décoratives saisies lors de l'import. Un bouton
+  permet d'inverser une fois la correspondance groupe A/B vers les deux clubs.
 - États `controlled`, `contested`, `loose`, `out`, `unknown` et segments de possession.
 - Candidats passe, conduite, perte, récupération, duel, dribble, tir et sortie.
 - Statistiques équipe/joueur, pistes non attribuées, affectation manuelle au roster.
@@ -29,9 +31,9 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 flowchart TD
     A["Vidéo complète"] --> B["Qualité + périodes"]
     B --> C["Référence main.py · 8 × 5 s"]
-    C --> D["Validation · 8 × 15 s"]
+    C --> D["Validation · 2 × 60 s"]
     D --> E{"Détections fiables ?"}
-    E -->|Non| F["Corriger modèle + couleurs"]
+    E -->|Non| F["Corriger modèle + correspondance A/B"]
     E -->|Oui| G["Analyse complète"]
     G --> H["Ball in play + actions + statistiques"]
 ```
@@ -93,14 +95,17 @@ Le serveur Django et le worker sont volontairement séparés : l’interface res
 
 ## Premier match
 
-1. Importer la vidéo et renseigner les couleurs principales des maillots.
+1. Importer la vidéo. Les couleurs des clubs servent uniquement à l'interface ;
+   la vision apprend les maillots directement sur les joueurs détectés.
 2. Importer chaque effectif en CSV (`name,shirt_number,position`).
 3. Cliquer sur **1. Détecter/recalculer les mi-temps**. La coupure centrale est proposée automatiquement ; vérifier puis confirmer les quatre limites vidéo modifiables.
 4. Lancer **2a. Référence main.py · 40 s**. Il contrôle huit séquences de 5 secondes réparties dans les deux mi-temps. Chaque aperçu compare la sortie YOLO brute à gauche et le tracking réellement utilisé à droite.
-5. Lancer ensuite **2b. Test de validation · 2 min**. Il applique exactement le même moteur sur deux séquences continues de 60 secondes, une par mi-temps, et mesure le ballon visible, les joueurs par image, l’équilibre des équipes et la fragmentation des pistes. Ces deux tests affichent le tracking dans la page et dans une fenêtre OpenCV fluide sous Windows. `ESC` annule le test.
-6. Ne lancer **3. Analyse complète** que si le test de 2 minutes est validé. Le bouton reste verrouillé si le socle visuel échoue.
-7. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
-8. Valider ou corriger les actions en regardant le clip ou le timecode, puis exporter les résultats.
+5. Vérifier que groupe A/B correspond aux bons clubs ; utiliser **Inverser les
+   équipes A/B** si les noms sont retournés, puis relancer la référence.
+6. Lancer ensuite **2b. Test de validation · 2 min**. Il applique exactement le même moteur sur deux séquences continues de 60 secondes, une par mi-temps, et mesure le ballon visible, les joueurs par image, l’équilibre des équipes et la fragmentation des pistes. Ces deux tests affichent le tracking dans la page et dans une fenêtre OpenCV fluide sous Windows. `ESC` annule le test.
+7. Ne lancer **3. Analyse complète** que si le test de 2 minutes est validé. Le bouton reste verrouillé si le socle visuel échoue.
+8. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
+9. Valider ou corriger les actions en regardant le clip ou le timecode, puis exporter les résultats.
 
 Un aperçu sans vidéo peut être créé avec :
 

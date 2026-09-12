@@ -362,10 +362,7 @@ class MatchAnalysisRunner:
             goalkeeper_class_ids=self.config.get("yolo_goalkeeper_class_ids", []),
             referee_class_ids=self.config.get("yolo_referee_class_ids", []),
             ball_class_ids=self.config.get("yolo_ball_class_ids", []),
-            team_colors={
-                "home": self.match.home_team.primary_color,
-                "away": self.match.away_team.primary_color,
-            },
+            home_team_cluster=str(self.config.get("home_team_cluster", "B")),
         )
         tracking_started_at = time.monotonic()
         last_live_update = 0.0
