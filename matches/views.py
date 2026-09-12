@@ -43,7 +43,7 @@ def _run_mode(run: AnalysisRun | None) -> str:
     if run is None:
         return ""
     mode = str((run.config or {}).get("analysis_mode", "full"))
-    return mode if mode in {"prepare", "sample", "full"} else "full"
+    return mode if mode in {"prepare", "reference", "sample", "full"} else "full"
 
 
 def _passing_sample_run(match: Match) -> AnalysisRun | None:
@@ -149,22 +149,30 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
         "latest_run": latest_run,
         "latest_mode": latest_mode,
         "latest_stage_label": (
-            "Test joueurs, ballon et jeu effectif"
+            (
+                "Référence main.py en direct"
+                if latest_mode == "reference"
+                else "Test joueurs, ballon et jeu effectif"
+            )
             if latest_run
-            and latest_mode == "sample"
+            and latest_mode in {"reference", "sample"}
             and latest_run.current_stage == AnalysisRun.Stage.TRACKING
             else (latest_run.get_current_stage_display() if latest_run else "")
         ),
         "sample_diagnostics": (
             (latest_run.metrics or {}).get("diagnostics") or {}
-            if latest_mode == "sample"
+            if latest_mode in {"reference", "sample"}
             else {}
         ),
         "sample_windows": (
-            (latest_run.metrics or {}).get("windows") or [] if latest_mode == "sample" else []
+            (latest_run.metrics or {}).get("windows") or []
+            if latest_mode in {"reference", "sample"}
+            else []
         ),
         "sample_previews": (
-            (latest_run.metrics or {}).get("previews") or [] if latest_mode == "sample" else []
+            (latest_run.metrics or {}).get("previews") or []
+            if latest_mode in {"reference", "sample"}
+            else []
         ),
         "periods_confirmed": len(periods) == 2 and all(period.confirmed for period in periods),
         "sample_ready": _passing_sample_run(match) is not None,
@@ -262,11 +270,11 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
         return redirect(match)
 
     mode = request.POST.get("mode", "sample")
-    if mode not in {"prepare", "sample", "full"}:
+    if mode not in {"prepare", "reference", "sample", "full"}:
         messages.error(request, "Mode d’analyse invalide.")
         return redirect(match)
     confirmed_periods = list(match.periods.filter(confirmed=True).order_by("number"))
-    if mode in {"sample", "full"} and len(confirmed_periods) != 2:
+    if mode in {"reference", "sample", "full"} and len(confirmed_periods) != 2:
         messages.warning(
             request,
             "Confirme d’abord les limites des deux mi-temps avant de lancer ce test.",
@@ -285,6 +293,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "analysis_mode": mode,
             "backend": settings.ANALYSIS_BACKEND,
             "device": settings.ANALYSIS_DEVICE,
+            "yolo_profile": settings.YOLO_PROFILE,
             "sample_seconds": settings.ANALYSIS_SAMPLE_SECONDS,
             "quality_max_samples": settings.ANALYSIS_QUALITY_MAX_SAMPLES,
             "tracking_fps": settings.ANALYSIS_TRACKING_FPS,
@@ -302,7 +311,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_goalkeeper_class_ids": settings.YOLO_GOALKEEPER_CLASS_IDS,
             "yolo_referee_class_ids": settings.YOLO_REFEREE_CLASS_IDS,
             "yolo_ball_class_ids": settings.YOLO_BALL_CLASS_IDS,
-            "sample_window_seconds": 15,
+            "sample_window_seconds": 5 if mode == "reference" else 15,
             "sample_windows_per_half": 4,
             "render_clips": mode == "full",
         },
@@ -311,7 +320,8 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
     match.save(update_fields=["status", "updated_at"])
     labels = {
         "prepare": "Détection automatique des mi-temps",
-        "sample": "Test rapide de 2 minutes",
+        "reference": "Référence main.py de 40 secondes",
+        "sample": "Test de validation de 2 minutes",
         "full": "Analyse complète",
     }
     messages.success(request, f"{labels[mode]} · {str(run.pk)[:8]} mis en file.")
@@ -323,8 +333,12 @@ def analysis_status(request: HttpRequest, pk) -> JsonResponse:
     run = get_object_or_404(AnalysisRun.objects.select_related("match"), pk=pk)
     live_progress = (run.metrics or {}).get("live_progress") or {}
     stage_label = run.get_current_stage_display()
-    if _run_mode(run) == "sample" and run.current_stage == AnalysisRun.Stage.TRACKING:
-        stage_label = "Test joueurs, ballon et jeu effectif"
+    if _run_mode(run) in {"reference", "sample"} and run.current_stage == AnalysisRun.Stage.TRACKING:
+        stage_label = (
+            "Référence main.py en direct"
+            if _run_mode(run) == "reference"
+            else "Test joueurs, ballon et jeu effectif"
+        )
     return JsonResponse(
         {
             "id": str(run.pk),
@@ -336,8 +350,29 @@ def analysis_status(request: HttpRequest, pk) -> JsonResponse:
             "error": run.error_message,
             "match_status": run.match.status,
             "progress_detail": live_progress if run.current_stage == AnalysisRun.Stage.TRACKING else {},
+            "live_preview_url": reverse("analysis-live-preview", kwargs={"pk": run.pk}),
         }
     )
+
+
+@require_GET
+def analysis_live_preview(request: HttpRequest, pk) -> HttpResponse:
+    run = get_object_or_404(AnalysisRun, pk=pk)
+    preview_path = (
+        settings.MEDIA_ROOT
+        / "matches"
+        / str(run.match_id)
+        / "live"
+        / f"{run.pk}.jpg"
+    )
+    if not preview_path.is_file():
+        return HttpResponse(status=404)
+    # Read and close immediately so the worker can atomically replace the next
+    # frame on Windows while this response is being sent.
+    response = HttpResponse(preview_path.read_bytes(), content_type="image/jpeg")
+    response["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response["Pragma"] = "no-cache"
+    return response
 
 
 @require_POST

@@ -10,6 +10,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from django.conf import settings
 from django.core.files import File
 from django.core.files.base import ContentFile
@@ -129,7 +131,7 @@ class MatchAnalysisRunner:
     @property
     def analysis_mode(self) -> str:
         mode = str(self.config.get("analysis_mode", "full"))
-        return mode if mode in {"prepare", "sample", "full"} else "full"
+        return mode if mode in {"prepare", "reference", "sample", "full"} else "full"
 
     def _empty_result(self) -> dict:
         return {
@@ -298,7 +300,11 @@ class MatchAnalysisRunner:
         windows = self._tracking_windows(periods)
         tracking_duration = sum(window["end_ms"] - window["start_ms"] for window in windows)
         estimated_frames = math.ceil(tracking_duration / 1000.0 * tracking_fps)
-        operation = "Test rapide" if self.analysis_mode == "sample" else "Tracking"
+        operation = (
+            "Référence main.py"
+            if self.analysis_mode == "reference"
+            else ("Test rapide" if self.analysis_mode == "sample" else "Tracking")
+        )
         self._save_live_progress(
             22,
             {
@@ -334,6 +340,7 @@ class MatchAnalysisRunner:
             backend,
             model_path=self.config.get("yolo_model_path", ""),
             device=device,
+            profile=str(self.config.get("yolo_profile", "main_py")),
             confidence=float(self.config.get("yolo_confidence", 0.30)),
             ball_confidence=float(self.config.get("yolo_ball_confidence", 0.12)),
             image_size=int(self.config.get("yolo_image_size", 1280)),
@@ -380,6 +387,15 @@ class MatchAnalysisRunner:
         model_classes: dict[str, str] = {}
         tracker_name = str(self.config.get("yolo_tracker", "bytetrack"))
         preview_artifacts: list[dict] = []
+        live_preview_path = (
+            Path(settings.MEDIA_ROOT)
+            / "matches"
+            / str(self.match.pk)
+            / "live"
+            / f"{self.run.pk}.jpg"
+        )
+        live_preview_path.parent.mkdir(parents=True, exist_ok=True)
+        last_live_preview = 0.0
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
             temp_path = Path(temp_dir)
@@ -419,6 +435,18 @@ class MatchAnalysisRunner:
                             period_prefix,
                             track_summaries,
                         )
+                        now = time.monotonic()
+                        if now - last_live_preview >= 2.0:
+                            self._write_live_preview(
+                                frame,
+                                analysis,
+                                live_preview_path,
+                                team_labels={
+                                    "home": f"{self._team_code(self.match.home_team)} (T1)",
+                                    "away": f"{self._team_code(self.match.away_team)} (T2)",
+                                },
+                            )
+                            last_live_preview = now
                         sample = ball_engine.observe(analysis)
                         period_samples.append(sample)
                         all_samples.append((period, sample))
@@ -457,10 +485,8 @@ class MatchAnalysisRunner:
                         diagnostic_counts[f"state_{str(sample.state)}"] += 1
                         for athlete in analysis.athletes:
                             team_observations[athlete.team_key or "unknown"] += 1
-                        analysis.diagnostics.pop("raw_athlete_boxes", None)
-                        analysis.diagnostics.pop("rejected_person_boxes", None)
                         if (
-                            self.analysis_mode == "sample"
+                            self.analysis_mode in {"reference", "sample"}
                             and not preview_saved
                             and timestamp_ms >= preview_target_ms
                         ):
@@ -497,6 +523,12 @@ class MatchAnalysisRunner:
                                 }
                             )
                             preview_saved = True
+                        # Keep the detailed detector rows only long enough to
+                        # render the side-by-side diagnostic. They would make
+                        # the full NDJSON artifact unnecessarily large.
+                        analysis.diagnostics.pop("raw_detections", None)
+                        analysis.diagnostics.pop("raw_athlete_boxes", None)
+                        analysis.diagnostics.pop("rejected_person_boxes", None)
                         tracking_file.write(
                             json.dumps(
                                 {
@@ -604,6 +636,11 @@ class MatchAnalysisRunner:
             requested_tracking_fps=requested_tracking_fps,
             model_classes=model_classes,
             tracker_name=tracker_name,
+            profile_name=str(getattr(provider, "profile", backend)),
+            image_size=int(getattr(provider, "image_size", 0)),
+            detector_confidence=float(getattr(provider, "confidence", 0.0)),
+            ball_confidence=float(getattr(provider, "ball_confidence", 0.0)),
+            tracker_frame_rate=int(getattr(provider, "tracker_frame_rate", 0)),
         )
         return {
             "analysis_mode": self.analysis_mode,
@@ -630,7 +667,36 @@ class MatchAnalysisRunner:
     ) -> None:
         import cv2
 
+        raw_preview = frame.copy()
         preview = frame.copy()
+        raw_colors = {
+            "player": (0, 215, 255),
+            "goalkeeper": (255, 175, 50),
+            "referee": (255, 220, 70),
+            "ball": (255, 0, 255),
+        }
+        raw_labels = {
+            "player": "YOLO J",
+            "goalkeeper": "YOLO GB",
+            "referee": "YOLO ARB",
+            "ball": "YOLO BALLON",
+        }
+        for detection in analysis.diagnostics.get("raw_detections", []):
+            x1, y1, x2, y2 = (int(value) for value in detection["bbox"])
+            role = str(detection.get("role", "player"))
+            confidence = float(detection.get("confidence", 0.0))
+            color = raw_colors.get(role, (0, 215, 255))
+            cv2.rectangle(raw_preview, (x1, y1), (x2, y2), color, 3 if role == "ball" else 2)
+            cv2.putText(
+                raw_preview,
+                f"{raw_labels.get(role, 'YOLO')} {confidence:.2f}",
+                (x1, max(18, y1 - 7)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
         colors = {
             "home": (70, 220, 120),
             "away": (70, 130, 255),
@@ -671,10 +737,31 @@ class MatchAnalysisRunner:
                 1,
                 cv2.LINE_AA,
             )
+        cv2.rectangle(raw_preview, (8, 8), (760, 58), (20, 20, 20), -1)
+        cv2.putText(
+            raw_preview,
+            "A. YOLO BRUT - AVANT TRACKER ET FILTRES",
+            (18, 27),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.44,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            raw_preview,
+            "JAUNE=JOUEUR | BLEU=GB | CYAN=ARBITRE | MAGENTA=BALLON",
+            (18, 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.40,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
         cv2.rectangle(preview, (8, 8), (760, 58), (20, 20, 20), -1)
         cv2.putText(
             preview,
-            "TOUS JOUEURS / GARDIENS / ARBITRES DETECTES -> TRACKER",
+            "B. TRACKING FINAL - DONNEES UTILISEES PAR L'ANALYSE",
             (18, 27),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.44,
@@ -697,12 +784,94 @@ class MatchAnalysisRunner:
             1,
             cv2.LINE_AA,
         )
+        separator = np.full((preview.shape[0], 8, 3), 245, dtype=np.uint8)
+        comparison = np.hstack((raw_preview, separator, preview))
+        max_width = 2560
+        if comparison.shape[1] > max_width:
+            scale = max_width / comparison.shape[1]
+            comparison = cv2.resize(comparison, None, fx=scale, fy=scale)
+        if not cv2.imwrite(str(output_path), comparison):
+            raise RuntimeError("Impossible d’écrire l’aperçu annoté du test rapide.")
+
+    @staticmethod
+    def _write_live_preview(
+        frame,
+        analysis: FrameAnalysis,
+        output_path: Path,
+        *,
+        team_labels: dict[str, str] | None = None,
+    ) -> None:
+        """Atomically publish a light tracking frame for the browser poller."""
+
+        import cv2
+
+        preview = frame.copy()
+        colors = {
+            "home": (70, 220, 120),
+            "away": (70, 130, 255),
+            "unknown": (190, 190, 190),
+            "ball": (255, 255, 255),
+            "goalkeeper": (255, 175, 50),
+            "referee": (255, 220, 70),
+        }
+        for obj in analysis.objects:
+            x1, y1, x2, y2 = (int(value) for value in obj.bbox_xyxy)
+            if obj.role == ObjectRole.BALL:
+                color = colors["ball"]
+                label = "BALLON"
+            elif obj.role == ObjectRole.GOALKEEPER:
+                color = colors["goalkeeper"]
+                label = "GB"
+            elif obj.role == ObjectRole.REFEREE:
+                color = colors["referee"]
+                label = "ARBITRE/JUGE"
+            else:
+                color = colors.get(obj.team_key or "unknown", colors["unknown"])
+                team_label = (team_labels or {}).get(obj.team_key or "", "EQUIPE ?")
+                label = f"J {team_label}"
+            track_number = obj.track_id.rsplit("-", 1)[-1]
+            if obj.role != ObjectRole.BALL:
+                label = f"{label} #{track_number}"
+            cv2.rectangle(
+                preview,
+                (x1, y1),
+                (x2, y2),
+                color,
+                3 if obj.role == ObjectRole.BALL else 2,
+            )
+            cv2.putText(
+                preview,
+                label,
+                (x1, max(18, y1 - 7)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+        cv2.rectangle(preview, (8, 8), (850, 38), (20, 20, 20), -1)
+        cv2.putText(
+            preview,
+            f"TRACKING LIVE - VIDEO {MatchAnalysisRunner._duration_label(analysis.timestamp_ms / 1000)}",
+            (18, 28),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.50,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
         max_width = 1280
         if preview.shape[1] > max_width:
             scale = max_width / preview.shape[1]
             preview = cv2.resize(preview, None, fx=scale, fy=scale)
-        if not cv2.imwrite(str(output_path), preview):
-            raise RuntimeError("Impossible d’écrire l’aperçu annoté du test rapide.")
+        temporary_path = output_path.with_name(f".{output_path.stem}.tmp.jpg")
+        if not cv2.imwrite(
+            str(temporary_path),
+            preview,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 76],
+        ):
+            raise RuntimeError("Impossible d’écrire l’aperçu live du tracking.")
+        temporary_path.replace(output_path)
 
     @staticmethod
     def _bbox_iou(first, second) -> float:
@@ -724,7 +893,7 @@ class MatchAnalysisRunner:
         return str(team.short_name or team.name)[:4].upper()
 
     def _tracking_windows(self, periods: list[MatchPeriod]) -> list[dict]:
-        if self.analysis_mode != "sample":
+        if self.analysis_mode not in {"reference", "sample"}:
             return [
                 {
                     "period": period,
@@ -736,8 +905,8 @@ class MatchAnalysisRunner:
             ]
 
         window_ms = max(
-            10_000,
-            int(float(self.config.get("sample_window_seconds", 15)) * 1_000),
+            5_000,
+            int(float(self.config.get("sample_window_seconds", 5)) * 1_000),
         )
         windows_per_half = max(
             1,
@@ -794,6 +963,11 @@ class MatchAnalysisRunner:
         requested_tracking_fps: float = 0.0,
         model_classes: dict[str, str] | None = None,
         tracker_name: str = "",
+        profile_name: str = "",
+        image_size: int = 0,
+        detector_confidence: float = 0.0,
+        ball_confidence: float = 0.0,
+        tracker_frame_rate: int = 0,
     ) -> dict:
         frames = max(int(counts["frames"]), 0)
         raw_athlete_observations = int(
@@ -848,6 +1022,11 @@ class MatchAnalysisRunner:
             "requested_tracking_fps": round(float(requested_tracking_fps), 2),
             "model_classes": model_classes or {},
             "tracker": tracker_name,
+            "profile": profile_name,
+            "image_size": int(image_size),
+            "detector_confidence": round(float(detector_confidence), 3),
+            "ball_confidence": round(float(ball_confidence), 3),
+            "tracker_frame_rate": int(tracker_frame_rate),
             "issues": [],
         }
         failures: list[str] = []

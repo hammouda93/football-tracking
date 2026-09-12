@@ -28,11 +28,12 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 ```mermaid
 flowchart TD
     A["Vidéo complète"] --> B["Qualité + périodes"]
-    B --> C["Test rapide · 4 × 30 s"]
-    C --> D{"Détections fiables ?"}
-    D -->|Non| E["Corriger modèle + couleurs"]
-    D -->|Oui| F["Analyse complète"]
-    F --> G["Ball in play + actions + statistiques"]
+    B --> C["Référence main.py · 8 × 5 s"]
+    C --> D["Validation · 8 × 15 s"]
+    D --> E{"Détections fiables ?"}
+    E -->|Non| F["Corriger modèle + couleurs"]
+    E -->|Oui| G["Analyse complète"]
+    G --> H["Ball in play + actions + statistiques"]
 ```
 
 Le détail des décisions techniques et des limites est dans [docs/architecture.md](docs/architecture.md).
@@ -95,10 +96,11 @@ Le serveur Django et le worker sont volontairement séparés : l’interface res
 1. Importer la vidéo et renseigner les couleurs principales des maillots.
 2. Importer chaque effectif en CSV (`name,shirt_number,position`).
 3. Cliquer sur **1. Détecter/recalculer les mi-temps**. La coupure centrale est proposée automatiquement ; vérifier puis confirmer les quatre limites vidéo modifiables.
-4. Lancer **2. Test rapide · 2 min**. Il contrôle quatre séquences continues de 30 secondes et mesure le ballon visible, les joueurs par image, le jeu effectif, l’équilibre des équipes et la fragmentation des pistes. Il ne produit aucune statistique de match.
-5. Ne lancer **3. Analyse complète** que si le diagnostic est validé. Le bouton reste verrouillé si le socle visuel échoue.
-6. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
-7. Valider ou corriger les actions en regardant le clip ou le timecode, puis exporter les résultats.
+4. Lancer **2a. Référence main.py · 40 s**. Il contrôle huit séquences de 5 secondes réparties dans les deux mi-temps. Chaque aperçu compare la sortie YOLO brute à gauche et le tracking réellement utilisé à droite.
+5. Lancer ensuite **2b. Test de validation · 2 min**. Il applique exactement le même moteur sur huit séquences de 15 secondes et mesure le ballon visible, les joueurs par image, l’équilibre des équipes et la fragmentation des pistes. Ces deux tests affichent aussi le tracking annoté en direct dans la page.
+6. Ne lancer **3. Analyse complète** que si le test de 2 minutes est validé. Le bouton reste verrouillé si le socle visuel échoue.
+7. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
+8. Valider ou corriger les actions en regardant le clip ou le timecode, puis exporter les résultats.
 
 Un aperçu sans vidéo peut être créé avec :
 
@@ -115,15 +117,16 @@ Les valeurs se trouvent dans `.env` :
 | `ANALYSIS_BACKEND` | `heuristic` | `heuristic` ou `yolo` |
 | `ANALYSIS_SAMPLE_SECONDS` | `1.0` | Pas initial de diagnostic |
 | `ANALYSIS_QUALITY_MAX_SAMPLES` | `360` | Nombre maximal d’images lues directement pendant le contrôle qualité |
-| `ANALYSIS_TRACKING_FPS` | `10.0` | Images analysées par seconde |
-| `ANALYSIS_MIN_YOLO_TRACKING_FPS` | `8.0` | Plancher de cadence imposé au tracker pour limiter la fragmentation |
+| `ANALYSIS_TRACKING_FPS` | `12.5` | Images analysées par seconde |
+| `ANALYSIS_MIN_YOLO_TRACKING_FPS` | `12.5` | Cadence du profil de référence, équivalente à une image sur deux à 25 FPS |
 | `ANALYSIS_DEVICE` | `cpu` | `cpu`, `0`, `cuda:0`, selon Ultralytics |
+| `YOLO_PROFILE` | `main_py` | `main_py` reproduit le prototype validé ; `advanced` réactive les réglages indépendants |
 | `YOLO_MODEL_PATH` | `models/football-players.pt` | Poids locaux |
 | `YOLO_CONFIDENCE` | `0.30` | Seuil de détection |
-| `YOLO_BALL_CONFIDENCE` | `0.12` | Seuil séparé pour le petit ballon |
-| `YOLO_IMAGE_SIZE` | `1280` | Résolution d’inférence |
+| `YOLO_BALL_CONFIDENCE` | `0.30` | Seuil du ballon dans le profil de référence |
+| `YOLO_IMAGE_SIZE` | `640` | Résolution d’inférence du prototype `main.py` |
 | `YOLO_TRACKER` | `bytetrack` | Profil historique qui conserve le mieux les joueurs ; `botsort` reste disponible |
-| `YOLO_TRACK_LOW_CONFIDENCE` | `0.10` | Détections faibles réservées à la récupération d’une piste |
+| `YOLO_TRACK_LOW_CONFIDENCE` | `0.30` | Seuil réellement envoyé à ByteTrack dans le profil de référence |
 | `YOLO_NEW_TRACK_CONFIDENCE` | `0.25` | Confiance minimale pour créer un nouvel ID |
 | `YOLO_TRACK_MATCH_THRESHOLD` | `0.80` | Tolérance d’association du tracker |
 | `YOLO_TRACK_BUFFER_SECONDS` | `5.0` | Durée de conservation d’une piste brièvement perdue |

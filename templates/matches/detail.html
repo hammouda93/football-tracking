@@ -17,7 +17,8 @@
     <div class="header-actions">
       {% if match.video %}
         <form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-ghost" name="mode" value="prepare" type="submit">1. Détecter/recalculer les mi-temps</button></form>
-        {% if periods_confirmed %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" name="mode" value="sample" type="submit">2. Test rapide · 2 min <span>▶</span></button></form>{% endif %}
+        {% if periods_confirmed %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" name="mode" value="reference" type="submit">2a. Référence main.py · 40 s <span>▶</span></button></form>{% endif %}
+        {% if periods_confirmed %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" name="mode" value="sample" type="submit">2b. Test de validation · 2 min <span>▶</span></button></form>{% endif %}
         {% if sample_ready %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-secondary" name="mode" value="full" type="submit">3. Analyse complète</button></form>{% else %}<button class="button button-secondary" type="button" disabled title="Le test rapide doit réussir">3. Analyse complète verrouillée</button>{% endif %}
       {% endif %}
       <a class="button button-ghost" href="{% url 'match-export-report' match.pk %}">Rapport JSON</a>
@@ -32,16 +33,17 @@
   {% if latest_run %}
     <section class="analysis-banner status-{{ latest_run.status|status_class }}" data-analysis-status="{% url 'analysis-status' latest_run.pk %}" data-terminal="{% if latest_run.status == 'completed' or latest_run.status == 'review' or latest_run.status == 'failed' or latest_run.status == 'cancelled' %}true{% else %}false{% endif %}">
       <div class="analysis-orb"><span></span></div>
-      <div class="analysis-copy"><small>{% if latest_mode == 'sample' %}Test rapide{% elif latest_mode == 'prepare' %}Préparation{% else %}Analyse complète{% endif %} · {{ latest_run.created_at|date:"d/m H:i" }}</small><strong data-stage-label>{{ latest_stage_label }}</strong><span class="analysis-detail" data-progress-detail>{% if latest_run.current_stage == 'tracking' %}{{ latest_run.metrics.live_progress.label }}{% endif %}</span><div class="progress-track"><i data-progress-bar style="width: {{ latest_run.progress }}%"></i></div></div>
+      <div class="analysis-copy"><small>{% if latest_mode == 'reference' %}Référence main.py{% elif latest_mode == 'sample' %}Test 2 min{% elif latest_mode == 'prepare' %}Préparation{% else %}Analyse complète{% endif %} · {{ latest_run.created_at|date:"d/m H:i" }}</small><strong data-stage-label>{{ latest_stage_label }}</strong><span class="analysis-detail" data-progress-detail>{% if latest_run.current_stage == 'tracking' %}{{ latest_run.metrics.live_progress.label }}{% endif %}</span><div class="progress-track"><i data-progress-bar style="width: {{ latest_run.progress }}%"></i></div></div>
       <div class="analysis-value"><strong data-progress-value>{{ latest_run.progress }}%</strong><span data-status-label>{{ latest_run.get_status_display }}</span></div>
       {% if latest_run.status == 'queued' or latest_run.status == 'processing' %}<form method="post" action="{% url 'analysis-cancel' latest_run.pk %}">{% csrf_token %}<button class="button button-danger button-small">Arrêter</button></form>{% endif %}
       {% if latest_run.error_message %}<p class="analysis-error" data-analysis-error>{{ latest_run.error_message }}</p>{% endif %}
+      {% if latest_run.status == 'queued' or latest_run.status == 'processing' %}<figure class="tracking-live" data-live-preview-container hidden><img data-live-preview data-live-preview-url="{% url 'analysis-live-preview' latest_run.pk %}" alt="Tracking annoté en direct"><figcaption>Tracking annoté en direct · actualisé automatiquement</figcaption></figure>{% endif %}
     </section>
   {% endif %}
 
-  {% if latest_mode == 'sample' and sample_diagnostics %}
+  {% if latest_mode == 'reference' or latest_mode == 'sample' %}{% if sample_diagnostics %}
     <section class="panel sample-diagnostic verdict-{{ sample_diagnostics.verdict }}">
-      <div class="panel-heading"><div><p class="eyebrow">Validation avant calcul complet</p><h2>Résultat du test rapide</h2></div><span class="sample-verdict">{% if sample_diagnostics.manual_approved %}VALIDÉ MANUELLEMENT{% elif sample_diagnostics.verdict == 'pass' %}VALIDÉ{% elif sample_diagnostics.verdict == 'warning' %}À CONTRÔLER{% else %}ÉCHEC{% endif %}</span></div>
+      <div class="panel-heading"><div><p class="eyebrow">Validation avant calcul complet</p><h2>{% if latest_mode == 'reference' %}Référence main.py · 40 s{% else %}Test de validation · 2 min{% endif %} : YOLO brut vs tracking final</h2></div><span class="sample-verdict">{% if sample_diagnostics.manual_approved %}VALIDÉ MANUELLEMENT{% elif sample_diagnostics.verdict == 'pass' %}VALIDÉ{% elif sample_diagnostics.verdict == 'warning' %}À CONTRÔLER{% else %}ÉCHEC{% endif %}</span></div>
       <div class="diagnostic-grid">
         <div><strong>{{ sample_diagnostics.duration_seconds|floatformat:0 }} s</strong><small>vidéo testée</small></div>
         <div><strong>{{ sample_diagnostics.frames_analyzed }}</strong><small>images analysées</small></div>
@@ -53,25 +55,26 @@
         <div><strong>{{ sample_diagnostics.home_team_share_pct|floatformat:1 }}%</strong><small>{{ match.home_team.short_name }}</small></div>
         <div><strong>{{ sample_diagnostics.away_team_share_pct|floatformat:1 }}%</strong><small>{{ match.away_team.short_name }}</small></div>
         {% if sample_diagnostics.tracking_fps %}<div><strong>{{ sample_diagnostics.tracking_fps|floatformat:1 }} FPS</strong><small>cadence {{ sample_diagnostics.tracker|default:"tracker"|upper }}</small></div>{% endif %}
-        {% if sample_diagnostics.duplicate_person_detections %}<div><strong>{{ sample_diagnostics.duplicate_person_detections }}</strong><small>doublons YOLO retirés</small></div>{% endif %}
+        {% if sample_diagnostics.duplicate_person_detections %}<div><strong>{{ sample_diagnostics.duplicate_person_detections }}</strong><small>chevauchements YOLO observés</small></div>{% endif %}
         {% if sample_diagnostics.rejected_person_detections %}<div><strong>{{ sample_diagnostics.rejected_person_detections }}</strong><small>personnes hors terrain/rejetées</small></div>{% endif %}
         {% if sample_diagnostics.raw_ball_detections %}<div><strong>{{ sample_diagnostics.raw_ball_detections }}</strong><small>candidats ballon bruts</small></div>{% endif %}
       </div>
+      <p class="diagnostic-note"><strong>Profil exécuté :</strong> <code>{{ sample_diagnostics.profile|default:"—" }}</code> · <code>imgsz={{ sample_diagnostics.image_size }}</code> · <code>conf={{ sample_diagnostics.detector_confidence }}</code> · <code>ball={{ sample_diagnostics.ball_confidence }}</code> · <code>{{ sample_diagnostics.tracker|upper }} {{ sample_diagnostics.tracker_frame_rate }} FPS</code>. Chaque aperçu montre la détection brute à gauche et les objets réellement transmis à l’analyse à droite.</p>
       {% if sample_previews %}<div class="sample-preview-grid">{% for preview in sample_previews %}<figure><a href="{{ preview.url }}" target="_blank"><img src="{{ preview.url }}" alt="Aperçu annoté MT{{ preview.period }} séquence {{ preview.window }}"></a><figcaption>MT{{ preview.period }} · {{ preview.video_time_ms|timecode }}</figcaption></figure>{% endfor %}</div>{% endif %}
       {% if sample_diagnostics.issues %}<ul class="diagnostic-issues">{% for issue in sample_diagnostics.issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% endif %}
       {% if sample_diagnostics.model_classes %}<p class="diagnostic-note"><strong>Classes lues dans le modèle :</strong> {% for class_id,class_name in sample_diagnostics.model_classes.items %}<code>{{ class_id }}={{ class_name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}</p>{% endif %}
       <div class="sample-windows"><strong>Séquences contrôlées :</strong>{% for window in sample_windows %}<button class="timecode-button" data-video-ms="{{ window.start_ms }}">MT{{ window.period }} · {{ window.start_ms|timecode }} ▶</button>{% endfor %}</div>
       {% if sample_diagnostics.periods_changed_since_run %}
         <p class="sample-validation-warning">Les limites des mi-temps ont changé depuis ce test. Relance le test rapide avant validation.</p>
-      {% elif not sample_diagnostics.manual_approved and sample_diagnostics.verdict != 'pass' and latest_run.status == 'review' %}
+      {% elif latest_mode == 'sample' and not sample_diagnostics.manual_approved and sample_diagnostics.verdict != 'pass' and latest_run.status == 'review' %}
         <form class="sample-manual-validation" method="post" action="{% url 'analysis-validate-sample' latest_run.pk %}">{% csrf_token %}
           <label><input type="checkbox" name="confirm" value="yes" required> J’ai vérifié tous les aperçus et j’accepte de continuer malgré les alertes.</label>
           <button class="button button-secondary button-small" type="submit">Valider manuellement et déverrouiller</button>
         </form>
       {% endif %}
-      <p class="diagnostic-note">Ce test ne crée ni tirs, ni passes, ni statistiques de match. Il vérifie seulement que la base visuelle est assez fiable avant plusieurs heures de calcul.</p>
+      <p class="diagnostic-note">{% if latest_mode == 'reference' %}Cette référence courte localise les pertes entre YOLO et le tracker. Lance ensuite le test de validation de 2 minutes avec exactement le même moteur.{% else %}Ce test ne crée ni tirs, ni passes, ni statistiques de match. Il vérifie que la base visuelle est assez fiable avant plusieurs heures de calcul.{% endif %}</p>
     </section>
-  {% endif %}
+  {% endif %}{% endif %}
 
   <section id="lab" class="workspace-grid">
     <article class="panel video-panel">

@@ -31,6 +31,7 @@ class Command(BaseCommand):
                 "quality_max_samples": settings.ANALYSIS_QUALITY_MAX_SAMPLES,
                 "render_clips": not options["no_clips"],
                 "device": settings.ANALYSIS_DEVICE,
+                "yolo_profile": settings.YOLO_PROFILE,
                 "yolo_model_path": settings.YOLO_MODEL_PATH,
                 "yolo_confidence": settings.YOLO_CONFIDENCE,
                 "yolo_ball_confidence": settings.YOLO_BALL_CONFIDENCE,

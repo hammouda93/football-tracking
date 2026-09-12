@@ -1,4 +1,5 @@
 import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -81,14 +82,69 @@ class DashboardTests(TestCase):
         self.assertEqual(run.config["sample_window_seconds"], 15)
         self.assertEqual(run.config["sample_windows_per_half"], 4)
         self.assertFalse(run.config["render_clips"])
-        self.assertEqual(run.config["min_yolo_tracking_fps"], 8.0)
+        self.assertEqual(run.config["yolo_profile"], "main_py")
+        self.assertEqual(run.config["min_yolo_tracking_fps"], 12.5)
         self.assertEqual(run.config["yolo_tracker"], "bytetrack")
-        self.assertEqual(run.config["yolo_track_low_confidence"], 0.10)
+        self.assertEqual(run.config["yolo_track_low_confidence"], 0.30)
         self.assertEqual(run.config["yolo_new_track_confidence"], 0.25)
         self.assertEqual(run.config["yolo_track_match_threshold"], 0.80)
-        self.assertEqual(run.config["yolo_ball_confidence"], 0.12)
+        self.assertEqual(run.config["yolo_ball_confidence"], 0.30)
+        self.assertEqual(run.config["yolo_image_size"], 640)
         self.assertEqual(run.config["yolo_player_class_ids"], [2])
         self.assertEqual(run.config["yolo_ball_class_ids"], [0])
+
+    def test_reference_run_uses_eight_five_second_windows(self):
+        home = Team.objects.create(name="Home", short_name="HOM")
+        away = Team.objects.create(name="Away", short_name="AWY")
+        match = Match.objects.create(home_team=home, away_team=away)
+        for number, start in ((1, 0), (2, 3_300_000)):
+            MatchPeriod.objects.create(
+                match=match,
+                number=number,
+                label=f"MT{number}",
+                video_start_ms=start,
+                video_end_ms=start + 2_700_000,
+                confirmed=True,
+            )
+
+        response = self.client.post(
+            reverse("match-start-analysis", kwargs={"pk": match.pk}),
+            {"mode": "reference"},
+        )
+
+        self.assertRedirects(response, match.get_absolute_url())
+        run = match.analysis_runs.get()
+        self.assertEqual(run.config["analysis_mode"], "reference")
+        self.assertEqual(run.config["sample_window_seconds"], 5)
+        self.assertEqual(run.config["sample_windows_per_half"], 4)
+        self.assertFalse(run.config["render_clips"])
+
+    def test_live_preview_endpoint_returns_latest_jpeg_without_cache(self):
+        home = Team.objects.create(name="Home", short_name="HOM")
+        away = Team.objects.create(name="Away", short_name="AWY")
+        match = Match.objects.create(home_team=home, away_team=away)
+        run = AnalysisRun.objects.create(match=match)
+
+        with tempfile.TemporaryDirectory() as media_root, override_settings(
+            MEDIA_ROOT=Path(media_root)
+        ):
+            url = reverse("analysis-live-preview", kwargs={"pk": run.pk})
+            self.assertEqual(self.client.get(url).status_code, 404)
+            preview_path = (
+                Path(media_root)
+                / "matches"
+                / str(match.pk)
+                / "live"
+                / f"{run.pk}.jpg"
+            )
+            preview_path.parent.mkdir(parents=True)
+            preview_path.write_bytes(b"jpeg-frame")
+
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"jpeg-frame")
+        self.assertIn("no-store", response["Cache-Control"])
 
     def test_full_analysis_is_blocked_until_sample_passes(self):
         home = Team.objects.create(name="Home", short_name="HOM")

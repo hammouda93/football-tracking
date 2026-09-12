@@ -33,6 +33,7 @@ class YoloVisionProvider(VisionProvider):
         *,
         model_path: str,
         device: str = "cpu",
+        profile: str = "main_py",
         confidence: float = 0.3,
         ball_confidence: float = 0.12,
         image_size: int = 1280,
@@ -61,9 +62,26 @@ class YoloVisionProvider(VisionProvider):
             ) from exc
         self.model = YOLO(model_path)
         self.device = device
+        self.profile = str(profile or "main_py").strip().lower()
+        if self.profile not in {"main_py", "advanced"}:
+            raise ValueError(
+                f"Profil YOLO inconnu : {self.profile}. "
+                "Valeurs acceptées : main_py, advanced."
+            )
+        if self.profile == "main_py":
+            confidence = 0.30
+            ball_confidence = 0.30
+            image_size = 640
+            tracker_name = "bytetrack"
+            tracker_low_confidence = 0.30
+            tracker_new_confidence = 0.25
+            tracker_match_threshold = 0.80
         self.confidence = confidence
         self.image_size = image_size
         self.tracking_fps = max(1.0, float(tracking_fps))
+        self.tracker_frame_rate = (
+            25 if self.profile == "main_py" else max(1, int(round(self.tracking_fps)))
+        )
         self.tracker_name = str(tracker_name or "botsort").strip().lower()
         if self.tracker_name not in {"botsort", "bytetrack"}:
             raise ValueError(
@@ -84,6 +102,11 @@ class YoloVisionProvider(VisionProvider):
             0.1, min(0.99, float(tracker_match_threshold))
         )
         self.tracker_buffer_seconds = max(1.0, float(tracker_buffer_seconds))
+        self.tracker_buffer_frames = (
+            30
+            if self.profile == "main_py"
+            else max(15, int(round(self.tracking_fps * self.tracker_buffer_seconds)))
+        )
         self.class_roles: dict[int, ObjectRole] = {}
         self._register_class_ids(player_class_ids, ObjectRole.PLAYER)
         self._register_class_ids(goalkeeper_class_ids, ObjectRole.GOALKEEPER)
@@ -136,8 +159,10 @@ class YoloVisionProvider(VisionProvider):
             track_high_thresh=float(self.confidence),
             track_low_thresh=self.tracker_low_confidence,
             new_track_thresh=self.tracker_new_confidence,
-            track_buffer=max(
-                15, int(round(self.tracking_fps * self.tracker_buffer_seconds))
+            track_buffer=getattr(
+                self,
+                "tracker_buffer_frames",
+                max(15, int(round(self.tracking_fps * self.tracker_buffer_seconds))),
             ),
             match_thresh=self.tracker_match_threshold,
             fuse_score=True,
@@ -157,11 +182,9 @@ class YoloVisionProvider(VisionProvider):
             ) from exc
         return sv.ByteTrack(
             track_activation_threshold=self.tracker_new_confidence,
-            lost_track_buffer=max(
-                15, int(round(self.tracking_fps * self.tracker_buffer_seconds))
-            ),
+            lost_track_buffer=self.tracker_buffer_frames,
             minimum_matching_threshold=self.tracker_match_threshold,
-            frame_rate=max(1, int(round(self.tracking_fps))),
+            frame_rate=self.tracker_frame_rate,
         )
 
     def reset(self) -> None:
@@ -181,9 +204,13 @@ class YoloVisionProvider(VisionProvider):
         height, width = frame.shape[:2]
         prediction = self.model.predict(
             source=frame,
-            # Keep low-confidence player boxes for the tracker's recovery pass.
-            # Reported detector recall still uses ``self.confidence`` below.
-            conf=self.tracker_low_confidence,
+            # The reference profile deliberately matches main.py. The advanced
+            # profile can still feed low-confidence boxes to the recovery pass.
+            conf=(
+                self.confidence
+                if self.profile == "main_py"
+                else self.tracker_low_confidence
+            ),
             imgsz=self.image_size,
             device=self.device,
             verbose=False,
@@ -206,19 +233,30 @@ class YoloVisionProvider(VisionProvider):
             ObjectRole.GOALKEEPER,
             ObjectRole.REFEREE,
         }
-        raw_trackable_indices = [
+        tracker_input_roles = (
+            trackable_roles | {ObjectRole.BALL}
+            if self.profile == "main_py"
+            else trackable_roles
+        )
+        raw_person_indices = [
             index for index, role in enumerate(roles) if role in trackable_roles
         ]
-        deduplicated_indices = self._deduplicate_indices(
+        tracker_input_indices = [
+            index for index, role in enumerate(roles) if role in tracker_input_roles
+        ]
+        deduplicated_person_indices = self._deduplicate_indices(
             detections.xyxy,
             confidences,
-            raw_trackable_indices,
+            raw_person_indices,
         )
-        # The historical standalone tracker passed every football-person detection
-        # to ByteTrack. Field/color pre-filters removed real distant players in TV
-        # shots, so ByteTrack now receives the complete deduplicated person set and
-        # uses temporal continuity to stabilise weak boxes.
-        trackable_indices = deduplicated_indices
+        # main.py did not remove overlapping detections before ByteTrack. Keeping
+        # that exact behaviour lets the short reference test isolate the pipeline
+        # regression instead of guessing at more thresholds.
+        trackable_indices = (
+            tracker_input_indices
+            if self.profile == "main_py"
+            else deduplicated_person_indices
+        )
         tracked_rows = self._update_tracker(
             prediction,
             detections,
@@ -229,6 +267,11 @@ class YoloVisionProvider(VisionProvider):
         objects: list[TrackedObject] = []
         for xyxy, confidence, class_id, tracker_id in tracked_rows:
             role = self._role_for(int(class_id), names)
+            # main.py sent the ball through ByteTrack but drew and consumed the
+            # raw detector ball separately. Preserve that without duplicating it
+            # in FrameAnalysis.objects.
+            if role == ObjectRole.BALL:
+                continue
             x1, y1, x2, y2 = [float(value) for value in xyxy]
             image_x = ((x1 + x2) / 2.0) / max(width, 1)
             image_y = y2 / max(height, 1)
@@ -249,7 +292,8 @@ class YoloVisionProvider(VisionProvider):
                     image_y=image_y,
                 )
             )
-        objects = self._deduplicate_tracked_objects(objects)
+        if self.profile != "main_py":
+            objects = self._deduplicate_tracked_objects(objects)
 
         if len(detections):
             ball_candidates = []
@@ -264,11 +308,15 @@ class YoloVisionProvider(VisionProvider):
                 ):
                     continue
                 ball_candidates.append((xyxy, confidence))
-            selected_ball = self._select_ball(
-                ball_candidates,
-                objects,
-                frame.shape,
-                timestamp_ms,
+            selected_ball = (
+                max(ball_candidates, key=lambda item: float(item[1]))
+                if self.profile == "main_py" and ball_candidates
+                else self._select_ball(
+                    ball_candidates,
+                    objects,
+                    frame.shape,
+                    timestamp_ms,
+                )
             )
             if selected_ball is not None:
                 xyxy, confidence = selected_ball
@@ -297,7 +345,7 @@ class YoloVisionProvider(VisionProvider):
                 "raw_athlete_detections": sum(
                     roles[index] in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
                     and confidences[index] >= self.confidence
-                    for index in trackable_indices
+                    for index in raw_person_indices
                 ),
                 "raw_referee_detections": sum(
                     role == ObjectRole.REFEREE and confidence >= self.confidence
@@ -313,14 +361,35 @@ class YoloVisionProvider(VisionProvider):
                 ),
                 "raw_athlete_boxes": [
                     [float(value) for value in detections.xyxy[index]]
-                    for index in trackable_indices
+                    for index in raw_person_indices
                     if roles[index] in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
                     and confidences[index] >= self.confidence
+                ],
+                "raw_detections": [
+                    {
+                        "bbox": [float(value) for value in detections.xyxy[index]],
+                        "role": str(roles[index]),
+                        "confidence": float(confidences[index]),
+                    }
+                    for index in range(len(detections))
+                    if roles[index]
+                    in {
+                        ObjectRole.PLAYER,
+                        ObjectRole.GOALKEEPER,
+                        ObjectRole.REFEREE,
+                        ObjectRole.BALL,
+                    }
+                    and confidences[index]
+                    >= (
+                        self.ball_confidence
+                        if roles[index] == ObjectRole.BALL
+                        else self.confidence
+                    )
                 ],
                 "rejected_person_boxes": [],
                 "rejected_person_detections": 0,
                 "duplicate_person_detections": max(
-                    0, len(raw_trackable_indices) - len(deduplicated_indices)
+                    0, len(raw_person_indices) - len(deduplicated_person_indices)
                 ),
                 "tracked_athletes": sum(
                     item.role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
@@ -333,6 +402,10 @@ class YoloVisionProvider(VisionProvider):
                     )
                 },
                 "tracker": self.tracker_name,
+                "profile": self.profile,
+                "image_size": self.image_size,
+                "detector_confidence": self.confidence,
+                "ball_confidence": self.ball_confidence,
             },
         )
 
