@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from collections import Counter
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -400,6 +402,59 @@ class VideoSamplingTests(unittest.TestCase):
             "CSS",
         )
 
+    def test_reference_and_live_previews_are_rendered(self):
+        import cv2
+        import numpy as np
+
+        frame = np.zeros((180, 320, 3), dtype=np.uint8)
+        analysis = FrameAnalysis(
+            timestamp_ms=12_000,
+            width=320,
+            height=180,
+            field_score=0.8,
+            objects=[
+                TrackedObject(
+                    "athlete-7",
+                    "player",
+                    (80, 40, 105, 120),
+                    0.9,
+                    team_key="home",
+                )
+            ],
+            diagnostics={
+                "raw_detections": [
+                    {
+                        "bbox": [80, 40, 105, 120],
+                        "role": "player",
+                        "confidence": 0.9,
+                    }
+                ]
+            },
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            comparison_path = Path(directory) / "comparison.jpg"
+            live_path = Path(directory) / "live.jpg"
+
+            MatchAnalysisRunner._write_sample_preview(
+                frame,
+                analysis,
+                comparison_path,
+                team_labels={"home": "HOM (T1)", "away": "AWY (T2)"},
+            )
+            MatchAnalysisRunner._write_live_preview(
+                frame,
+                analysis,
+                live_path,
+                team_labels={"home": "HOM (T1)", "away": "AWY (T2)"},
+            )
+
+            comparison = cv2.imread(str(comparison_path))
+            live = cv2.imread(str(live_path))
+
+        self.assertEqual(comparison.shape[0], 180)
+        self.assertGreater(comparison.shape[1], 640)
+        self.assertEqual(live.shape[:2], (180, 320))
+
     def test_team_label_uses_the_track_majority_instead_of_one_frame(self):
         provider = YoloVisionProvider.__new__(YoloVisionProvider)
         provider.team_colors = {"home": object(), "away": object()}
@@ -412,7 +467,28 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(result, "home")
 
-    def test_sample_uses_eight_fifteen_second_windows_across_both_halves(self):
+    def test_reference_uses_eight_five_second_windows_across_both_halves(self):
+        runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
+        runner.config = {
+            "analysis_mode": "reference",
+            "sample_window_seconds": 5,
+            "sample_windows_per_half": 4,
+        }
+        periods = [
+            SimpleNamespace(number=1, video_start_ms=0, video_end_ms=2_700_000),
+            SimpleNamespace(number=2, video_start_ms=3_300_000, video_end_ms=6_000_000),
+        ]
+
+        windows = runner._tracking_windows(periods)
+
+        self.assertEqual(len(windows), 8)
+        self.assertEqual(sum(item["end_ms"] - item["start_ms"] for item in windows), 40_000)
+        self.assertEqual(
+            [item["period"].number for item in windows],
+            [1, 1, 1, 1, 2, 2, 2, 2],
+        )
+
+    def test_validation_sample_keeps_two_minutes_across_both_halves(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {
             "analysis_mode": "sample",
@@ -427,10 +503,9 @@ class VideoSamplingTests(unittest.TestCase):
         windows = runner._tracking_windows(periods)
 
         self.assertEqual(len(windows), 8)
-        self.assertEqual(sum(item["end_ms"] - item["start_ms"] for item in windows), 120_000)
         self.assertEqual(
-            [item["period"].number for item in windows],
-            [1, 1, 1, 1, 2, 2, 2, 2],
+            sum(item["end_ms"] - item["start_ms"] for item in windows),
+            120_000,
         )
 
     def test_diagnostics_fail_bad_ball_team_and_track_detection(self):

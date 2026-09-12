@@ -95,6 +95,9 @@ ANALYSIS_MIN_YOLO_TRACKING_FPS = float(
     os.getenv("ANALYSIS_MIN_YOLO_TRACKING_FPS", "8.0")
 )
 ANALYSIS_DEVICE = os.getenv("ANALYSIS_DEVICE", "cpu")
+YOLO_PROFILE = os.getenv("YOLO_PROFILE", "main_py").strip().lower()
+if YOLO_PROFILE not in {"main_py", "advanced"}:
+    raise ValueError("YOLO_PROFILE doit valoir main_py ou advanced.")
 _yolo_model_path = Path(
     os.getenv("YOLO_MODEL_PATH", str(BASE_DIR / "models" / "football-players.pt"))
 )
@@ -113,6 +116,20 @@ YOLO_PLAYER_CLASS_IDS = _csv_ints("YOLO_PLAYER_CLASS_IDS", "2")
 YOLO_GOALKEEPER_CLASS_IDS = _csv_ints("YOLO_GOALKEEPER_CLASS_IDS")
 YOLO_REFEREE_CLASS_IDS = _csv_ints("YOLO_REFEREE_CLASS_IDS", "3")
 YOLO_BALL_CLASS_IDS = _csv_ints("YOLO_BALL_CLASS_IDS", "0")
+
+# ``main_py`` is a reproducible control profile. It mirrors the standalone
+# script already validated on the source video, so old environment experiments
+# cannot silently change the next comparison run. ``advanced`` restores every
+# individually configurable value above.
+if YOLO_PROFILE == "main_py":
+    ANALYSIS_MIN_YOLO_TRACKING_FPS = 12.5
+    YOLO_CONFIDENCE = 0.30
+    YOLO_BALL_CONFIDENCE = 0.30
+    YOLO_IMAGE_SIZE = 640
+    YOLO_TRACKER = "bytetrack"
+    YOLO_TRACK_LOW_CONFIDENCE = 0.30
+    YOLO_NEW_TRACK_CONFIDENCE = 0.25
+    YOLO_TRACK_MATCH_THRESHOLD = 0.80
 FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg")
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe")
 

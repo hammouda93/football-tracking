@@ -78,6 +78,15 @@
 
   const banner = document.querySelector('[data-analysis-status]');
   if (banner && banner.dataset.terminal !== 'true') {
+    const livePreview = banner.querySelector('[data-live-preview]');
+    const livePreviewContainer = banner.querySelector('[data-live-preview-container]');
+    const refreshLivePreview = (url) => {
+      if (!livePreview || !url) return;
+      livePreview.onload = () => {
+        if (livePreviewContainer) livePreviewContainer.hidden = false;
+      };
+      livePreview.src = `${url}${url.includes('?') ? '&' : '?'}v=${Date.now()}`;
+    };
     const poll = async () => {
       try {
         const response = await fetch(banner.dataset.analysisStatus, { headers: { Accept: 'application/json' } });
@@ -95,6 +104,9 @@
         if (progressDetail) progressDetail.textContent = data.progress_detail?.label || '';
         if (status) status.textContent = data.status_label;
         if (error && data.error) error.textContent = data.error;
+        if (data.stage === 'tracking') {
+          refreshLivePreview(data.live_preview_url || livePreview?.dataset.livePreviewUrl);
+        }
         if (['completed', 'review', 'failed', 'cancelled'].includes(data.status)) {
           window.setTimeout(() => window.location.reload(), 600);
           return;
