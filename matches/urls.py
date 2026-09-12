@@ -15,6 +15,7 @@ urlpatterns = [
     path("matches/<uuid:pk>/export/report.json", views.export_report_json, name="match-export-report"),
     path("analysis/<uuid:pk>/status/", views.analysis_status, name="analysis-status"),
     path("analysis/<uuid:pk>/cancel/", views.cancel_analysis, name="analysis-cancel"),
+    path("analysis/<uuid:pk>/validate/", views.validate_sample, name="analysis-validate-sample"),
     path("events/<int:pk>/review/", views.review_event, name="event-review"),
     path("tracks/<int:pk>/assign/", views.assign_track, name="track-assign"),
 ]

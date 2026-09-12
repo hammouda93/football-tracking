@@ -41,23 +41,33 @@
 
   {% if latest_mode == 'sample' and sample_diagnostics %}
     <section class="panel sample-diagnostic verdict-{{ sample_diagnostics.verdict }}">
-      <div class="panel-heading"><div><p class="eyebrow">Validation avant calcul complet</p><h2>Résultat du test rapide</h2></div><span class="sample-verdict">{% if sample_diagnostics.verdict == 'pass' %}VALIDÉ{% elif sample_diagnostics.verdict == 'warning' %}À CONTRÔLER{% else %}ÉCHEC{% endif %}</span></div>
+      <div class="panel-heading"><div><p class="eyebrow">Validation avant calcul complet</p><h2>Résultat du test rapide</h2></div><span class="sample-verdict">{% if sample_diagnostics.manual_approved %}VALIDÉ MANUELLEMENT{% elif sample_diagnostics.verdict == 'pass' %}VALIDÉ{% elif sample_diagnostics.verdict == 'warning' %}À CONTRÔLER{% else %}ÉCHEC{% endif %}</span></div>
       <div class="diagnostic-grid">
         <div><strong>{{ sample_diagnostics.duration_seconds|floatformat:0 }} s</strong><small>vidéo testée</small></div>
         <div><strong>{{ sample_diagnostics.frames_analyzed }}</strong><small>images analysées</small></div>
-        <div><strong>{{ sample_diagnostics.average_player_detections_per_frame|default:sample_diagnostics.average_athletes_per_frame|floatformat:1 }}</strong><small>détections YOLO / image</small></div>
-        <div><strong>{{ sample_diagnostics.average_tracked_athletes_per_frame|default:sample_diagnostics.average_athletes_per_frame|floatformat:1 }}</strong><small>joueurs suivis / image</small></div>
+        <div><strong>{{ sample_diagnostics.average_player_detections_per_frame|default:0|floatformat:1 }}</strong><small>détections YOLO / image</small></div>
+        <div><strong>{{ sample_diagnostics.average_tracked_athletes_per_frame|default:0|floatformat:1 }}</strong><small>joueurs suivis / image</small></div>
         <div><strong>{{ sample_diagnostics.ball_visibility_pct|floatformat:1 }}%</strong><small>ballon visible</small></div>
         <div><strong>{{ sample_diagnostics.playable_candidate_pct|floatformat:1 }}%</strong><small>jeu effectif candidat</small></div>
         <div><strong>{{ sample_diagnostics.tracks_per_minute|floatformat:1 }}</strong><small>pistes / minute</small></div>
         <div><strong>{{ sample_diagnostics.home_team_share_pct|floatformat:1 }}%</strong><small>{{ match.home_team.short_name }}</small></div>
         <div><strong>{{ sample_diagnostics.away_team_share_pct|floatformat:1 }}%</strong><small>{{ match.away_team.short_name }}</small></div>
         {% if sample_diagnostics.tracking_fps %}<div><strong>{{ sample_diagnostics.tracking_fps|floatformat:1 }} FPS</strong><small>cadence {{ sample_diagnostics.tracker|default:"tracker"|upper }}</small></div>{% endif %}
+        {% if sample_diagnostics.duplicate_person_detections %}<div><strong>{{ sample_diagnostics.duplicate_person_detections }}</strong><small>doublons YOLO retirés</small></div>{% endif %}
+        {% if sample_diagnostics.rejected_person_detections %}<div><strong>{{ sample_diagnostics.rejected_person_detections }}</strong><small>personnes hors terrain/rejetées</small></div>{% endif %}
       </div>
       {% if sample_previews %}<div class="sample-preview-grid">{% for preview in sample_previews %}<figure><a href="{{ preview.url }}" target="_blank"><img src="{{ preview.url }}" alt="Aperçu annoté MT{{ preview.period }} séquence {{ preview.window }}"></a><figcaption>MT{{ preview.period }} · {{ preview.video_time_ms|timecode }}</figcaption></figure>{% endfor %}</div>{% endif %}
       {% if sample_diagnostics.issues %}<ul class="diagnostic-issues">{% for issue in sample_diagnostics.issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% endif %}
       {% if sample_diagnostics.model_classes %}<p class="diagnostic-note"><strong>Classes lues dans le modèle :</strong> {% for class_id,class_name in sample_diagnostics.model_classes.items %}<code>{{ class_id }}={{ class_name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}</p>{% endif %}
       <div class="sample-windows"><strong>Séquences contrôlées :</strong>{% for window in sample_windows %}<button class="timecode-button" data-video-ms="{{ window.start_ms }}">MT{{ window.period }} · {{ window.start_ms|timecode }} ▶</button>{% endfor %}</div>
+      {% if sample_diagnostics.periods_changed_since_run %}
+        <p class="sample-validation-warning">Les limites des mi-temps ont changé depuis ce test. Relance le test rapide avant validation.</p>
+      {% elif not sample_diagnostics.manual_approved and sample_diagnostics.verdict != 'pass' and latest_run.status == 'review' %}
+        <form class="sample-manual-validation" method="post" action="{% url 'analysis-validate-sample' latest_run.pk %}">{% csrf_token %}
+          <label><input type="checkbox" name="confirm" value="yes" required> J’ai vérifié les quatre aperçus et j’accepte de continuer malgré les alertes.</label>
+          <button class="button button-secondary button-small" type="submit">Valider manuellement et déverrouiller</button>
+        </form>
+      {% endif %}
       <p class="diagnostic-note">Ce test ne crée ni tirs, ni passes, ni statistiques de match. Il vérifie seulement que la base visuelle est assez fiable avant plusieurs heures de calcul.</p>
     </section>
   {% endif %}
@@ -86,10 +96,11 @@
         <div class="panel-heading"><div><p class="eyebrow">Double horloge</p><h2>Mi-temps</h2></div><span class="info-dot" title="Temps vidéo → temps de match">i</span></div>
         {% if periods|length == 2 %}
           <form method="post" action="{% url 'match-update-periods' match.pk %}">{% csrf_token %}
-            <div class="period-row"><span>1</span><div><strong>1re mi-temps</strong><small>Début vidéo</small><input name="p1_start" value="{{ periods.0.video_start_ms|timecode }}"><small>Fin vidéo</small><input name="p1_end" value="{{ periods.0.video_end_ms|timecode }}"></div><em class="confidence">{{ periods.0.confidence|ratio_percent }}</em></div>
+            <p class="period-note">La proposition automatique ne lit pas encore le chrono TV. Place la vidéo sur le vrai coup d’envoi ou le coup de sifflet, puis utilise « Prendre la vidéo ».</p>
+            <div class="period-row"><span>1</span><div><strong>1re mi-temps</strong><small>Début vidéo</small><div class="period-input-actions"><input name="p1_start" value="{{ periods.0.video_start_ms|timecode }}"><button type="button" data-preview-input="p1_start">Voir</button><button type="button" data-set-period="p1_start">Prendre la vidéo</button></div><small>Fin vidéo</small><div class="period-input-actions"><input name="p1_end" value="{{ periods.0.video_end_ms|timecode }}"><button type="button" data-preview-input="p1_end">Voir</button><button type="button" data-set-period="p1_end">Prendre la vidéo</button></div><small>Horloge match au début</small><input name="p1_clock_start" value="{{ periods.0.match_clock_start_ms|timecode }}"></div><em class="confidence">{{ periods.0.get_source_display }}{% if periods.0.confirmed %}<br>confirmé{% endif %}</em></div>
             <div class="halftime-marker"><i></i><span>Mi-temps exclue</span><i></i></div>
-            <div class="period-row"><span>2</span><div><strong>2e mi-temps</strong><small>Début vidéo</small><input name="p2_start" value="{{ periods.1.video_start_ms|timecode }}"><small>Fin vidéo</small><input name="p2_end" value="{{ periods.1.video_end_ms|timecode }}"></div><em class="confidence">{{ periods.1.confidence|ratio_percent }}</em></div>
-            <button class="button button-secondary full-width" type="submit">Confirmer les limites</button>
+            <div class="period-row"><span>2</span><div><strong>2e mi-temps</strong><small>Début vidéo</small><div class="period-input-actions"><input name="p2_start" value="{{ periods.1.video_start_ms|timecode }}"><button type="button" data-preview-input="p2_start">Voir</button><button type="button" data-set-period="p2_start">Prendre la vidéo</button></div><small>Fin vidéo</small><div class="period-input-actions"><input name="p2_end" value="{{ periods.1.video_end_ms|timecode }}"><button type="button" data-preview-input="p2_end">Voir</button><button type="button" data-set-period="p2_end">Prendre la vidéo</button></div><small>Horloge match au début</small><input name="p2_clock_start" value="{{ periods.1.match_clock_start_ms|timecode }}"></div><em class="confidence">{{ periods.1.get_source_display }}{% if periods.1.confirmed %}<br>confirmé{% endif %}</em></div>
+            <button class="button button-secondary full-width" type="submit">Enregistrer et confirmer les deux horloges</button>
           </form>
         {% else %}<p class="muted">Lancez l’analyse pour obtenir une proposition automatique des deux mi-temps.</p>{% endif %}
       </article>
