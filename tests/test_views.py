@@ -1,4 +1,5 @@
 import tempfile
+from unittest.mock import patch
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
@@ -6,6 +7,8 @@ from django.test.utils import override_settings
 from django.urls import reverse
 
 from matches.models import AnalysisRun, Match, MatchPeriod, MatchVideo, Team
+from pipeline.runner import MatchAnalysisRunner
+from pipeline.types import FrameSignal
 
 
 class DashboardTests(TestCase):
@@ -79,8 +82,10 @@ class DashboardTests(TestCase):
         self.assertEqual(run.config["sample_windows_per_half"], 4)
         self.assertFalse(run.config["render_clips"])
         self.assertEqual(run.config["min_yolo_tracking_fps"], 8.0)
-        self.assertEqual(run.config["yolo_tracker"], "botsort")
+        self.assertEqual(run.config["yolo_tracker"], "bytetrack")
         self.assertEqual(run.config["yolo_track_low_confidence"], 0.10)
+        self.assertEqual(run.config["yolo_new_track_confidence"], 0.25)
+        self.assertEqual(run.config["yolo_track_match_threshold"], 0.80)
         self.assertEqual(run.config["yolo_ball_confidence"], 0.12)
         self.assertEqual(run.config["yolo_player_class_ids"], [2])
         self.assertEqual(run.config["yolo_ball_class_ids"], [0])
@@ -188,6 +193,65 @@ class DashboardTests(TestCase):
         self.assertEqual(second_half.video_start_ms, 2_933_000)
         self.assertEqual(second_half.match_clock_start_ms, 2_700_000)
         self.assertEqual(second_half.match_clock_end_ms, 5_775_000)
+        sample.refresh_from_db()
+        self.assertTrue(sample.metrics["diagnostics"]["periods_changed_since_run"])
+        self.assertFalse(sample.metrics["diagnostics"]["manual_approved"])
+
+    def test_prepare_recalculates_confirmed_periods_and_invalidates_sample(self):
+        home = Team.objects.create(name="Stade Tunisien", short_name="STA")
+        away = Team.objects.create(name="Club Sportif Sfaxien", short_name="CSS")
+        match = Match.objects.create(home_team=home, away_team=away)
+        MatchVideo.objects.create(
+            match=match,
+            file="matches/test/source.mp4",
+            original_name="source.mp4",
+        )
+        for number, start, end in (
+            (1, 0, 2_884_000),
+            (2, 2_884_000, 6_000_000),
+        ):
+            MatchPeriod.objects.create(
+                match=match,
+                number=number,
+                label=f"MT{number}",
+                video_start_ms=start,
+                video_end_ms=end,
+                confirmed=True,
+            )
+        sample = AnalysisRun.objects.create(
+            match=match,
+            status=AnalysisRun.Status.REVIEW,
+            config={"analysis_mode": "sample"},
+            metrics={
+                "diagnostics": {
+                    "verdict": "warning",
+                    "manual_approved": True,
+                }
+            },
+        )
+        prepare = AnalysisRun.objects.create(
+            match=match,
+            config={"analysis_mode": "prepare"},
+        )
+        signals = [
+            FrameSignal(
+                timestamp_ms=second * 1_000,
+                field_score=(
+                    0.03 if 2_880 < second < 2_940 else 0.64
+                ),
+                sharpness=150,
+                brightness=125,
+            )
+            for second in range(0, 6_001, 10)
+        ]
+
+        runner = MatchAnalysisRunner(prepare)
+        with patch("pipeline.runner._save_json_artifact"):
+            periods = runner._periods(signals, 6_000_000)
+
+        self.assertEqual(periods[1].video_start_ms, 2_940_000)
+        self.assertFalse(periods[0].confirmed)
+        self.assertEqual(periods[0].source, MatchPeriod.Source.AUTO)
         sample.refresh_from_db()
         self.assertTrue(sample.metrics["diagnostics"]["periods_changed_since_run"])
         self.assertFalse(sample.metrics["diagnostics"]["manual_approved"])

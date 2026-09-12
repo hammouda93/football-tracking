@@ -37,10 +37,10 @@ class YoloVisionProvider(VisionProvider):
         ball_confidence: float = 0.12,
         image_size: int = 1280,
         tracking_fps: float = 10.0,
-        tracker_name: str = "botsort",
+        tracker_name: str = "bytetrack",
         tracker_low_confidence: float = 0.10,
-        tracker_new_confidence: float = 0.35,
-        tracker_match_threshold: float = 0.85,
+        tracker_new_confidence: float = 0.25,
+        tracker_match_threshold: float = 0.80,
         tracker_buffer_seconds: float = 5.0,
         player_class_ids: list[int] | tuple[int, ...] | None = None,
         goalkeeper_class_ids: list[int] | tuple[int, ...] | None = None,
@@ -214,17 +214,11 @@ class YoloVisionProvider(VisionProvider):
             confidences,
             raw_trackable_indices,
         )
-        trackable_indices: list[int] = []
-        rejected_person_boxes: list[list[float]] = []
-        for index in deduplicated_indices:
-            role = roles[index]
-            box = detections.xyxy[index]
-            valid_shape = self._valid_person_box(frame.shape, box)
-            on_field = role == ObjectRole.REFEREE or self._box_on_field(frame, box)
-            if valid_shape and on_field:
-                trackable_indices.append(index)
-            elif confidences[index] >= self.confidence:
-                rejected_person_boxes.append([float(value) for value in box])
+        # The historical standalone tracker passed every football-person detection
+        # to ByteTrack. Field/color pre-filters removed real distant players in TV
+        # shots, so ByteTrack now receives the complete deduplicated person set and
+        # uses temporal continuity to stabilise weak boxes.
+        trackable_indices = deduplicated_indices
         tracked_rows = self._update_tracker(
             prediction,
             detections,
@@ -323,8 +317,8 @@ class YoloVisionProvider(VisionProvider):
                     if roles[index] in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
                     and confidences[index] >= self.confidence
                 ],
-                "rejected_person_boxes": rejected_person_boxes,
-                "rejected_person_detections": len(rejected_person_boxes),
+                "rejected_person_boxes": [],
+                "rejected_person_detections": 0,
                 "duplicate_person_detections": max(
                     0, len(raw_trackable_indices) - len(deduplicated_indices)
                 ),
@@ -422,47 +416,6 @@ class YoloVisionProvider(VisionProvider):
             kept.append(item)
         return kept
 
-    @staticmethod
-    def _valid_person_box(frame_shape, box) -> bool:
-        frame_height, frame_width = frame_shape[:2]
-        x1, y1, x2, y2 = [float(value) for value in box]
-        width = max(0.0, x2 - x1)
-        height = max(0.0, y2 - y1)
-        return (
-            height >= max(12.0, frame_height * 0.012)
-            and height >= width * 1.08
-            and width <= frame_width * 0.18
-            and height <= frame_height * 0.65
-        )
-
-    @staticmethod
-    def _box_on_field(frame, box) -> bool:
-        import cv2
-
-        frame_height, frame_width = frame.shape[:2]
-        x1, y1, x2, y2 = [float(value) for value in box]
-        width = max(1.0, x2 - x1)
-        height = max(1.0, y2 - y1)
-        center_x = int((x1 + x2) / 2.0)
-        foot_y = int(y2)
-        radius_x = max(7, int(width * 0.75))
-        radius_y = max(5, int(height * 0.12))
-        left = max(0, center_x - radius_x)
-        right = min(frame_width, center_x + radius_x + 1)
-        top = max(0, foot_y - radius_y)
-        bottom = min(frame_height, foot_y + radius_y + 1)
-        patch = frame[top:bottom, left:right]
-        if patch.size == 0:
-            return False
-        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
-        green = (
-            (hsv[:, :, 0] >= 25)
-            & (hsv[:, :, 0] <= 100)
-            & (hsv[:, :, 1] >= 20)
-            & (hsv[:, :, 2] >= 18)
-        )
-        return float(np.count_nonzero(green) / green.size) >= 0.12
-
     def _select_ball(self, candidates, athletes, frame_shape, timestamp_ms: int):
         if not candidates:
             return None
@@ -559,14 +512,16 @@ class YoloVisionProvider(VisionProvider):
         athlete_mask[indices] = True
         athletes = detections[athlete_mask] if len(detections) else detections
         tracked = self.tracker.update_with_detections(athletes)
-        return list(
-            zip(
+        return [
+            (box, confidence, class_id, tracker_id)
+            for box, confidence, class_id, tracker_id in zip(
                 tracked.xyxy,
                 tracked.confidence,
                 tracked.class_id,
                 tracked.tracker_id,
             )
-        )
+            if tracker_id is not None
+        ]
 
     def _register_class_ids(
         self,

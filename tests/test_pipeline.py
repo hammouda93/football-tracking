@@ -52,6 +52,28 @@ class PeriodDetectorTests(unittest.TestCase):
         self.assertTrue(result.requires_review)
         self.assertEqual(len(result.periods), 2)
 
+    def test_short_edited_halftime_break_is_detected_near_video_midpoint(self):
+        signals = []
+        duration_ms = 100 * 60_000
+        for second in range(0, 6_001, 10):
+            timestamp_ms = second * 1_000
+            in_halftime = 2_880_000 < timestamp_ms < 2_940_000
+            signals.append(
+                FrameSignal(
+                    timestamp_ms=timestamp_ms,
+                    field_score=0.03 if in_halftime else 0.64,
+                    sharpness=150,
+                    brightness=125,
+                )
+            )
+
+        result = PeriodDetector().detect(signals, duration_ms)
+
+        self.assertEqual(result.diagnostics["detection_method"], "central_broadcast_break")
+        self.assertEqual(result.periods[0].end_ms, 2_880_000)
+        self.assertEqual(result.periods[1].start_ms, 2_940_000)
+        self.assertTrue(result.requires_review)
+
 
 class VideoSamplingTests(unittest.TestCase):
     def test_quality_sampling_is_bounded_and_spread_over_full_match(self):

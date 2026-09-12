@@ -94,7 +94,7 @@ Le serveur Django et le worker sont volontairement séparés : l’interface res
 
 1. Importer la vidéo et renseigner les couleurs principales des maillots.
 2. Importer chaque effectif en CSV (`name,shirt_number,position`).
-3. Cliquer sur **1. Préparer les mi-temps**, puis vérifier et confirmer leurs limites vidéo.
+3. Cliquer sur **1. Détecter/recalculer les mi-temps**. La coupure centrale est proposée automatiquement ; vérifier puis confirmer les quatre limites vidéo modifiables.
 4. Lancer **2. Test rapide · 2 min**. Il contrôle quatre séquences continues de 30 secondes et mesure le ballon visible, les joueurs par image, le jeu effectif, l’équilibre des équipes et la fragmentation des pistes. Il ne produit aucune statistique de match.
 5. Ne lancer **3. Analyse complète** que si le diagnostic est validé. Le bouton reste verrouillé si le socle visuel échoue.
 6. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
@@ -122,10 +122,10 @@ Les valeurs se trouvent dans `.env` :
 | `YOLO_CONFIDENCE` | `0.30` | Seuil de détection |
 | `YOLO_BALL_CONFIDENCE` | `0.12` | Seuil séparé pour le petit ballon |
 | `YOLO_IMAGE_SIZE` | `1280` | Résolution d’inférence |
-| `YOLO_TRACKER` | `botsort` | `botsort` pour caméra TV mobile, ou `bytetrack` comme baseline |
+| `YOLO_TRACKER` | `bytetrack` | Profil historique qui conserve le mieux les joueurs ; `botsort` reste disponible |
 | `YOLO_TRACK_LOW_CONFIDENCE` | `0.10` | Détections faibles réservées à la récupération d’une piste |
-| `YOLO_NEW_TRACK_CONFIDENCE` | `0.35` | Confiance minimale pour créer un nouvel ID |
-| `YOLO_TRACK_MATCH_THRESHOLD` | `0.85` | Tolérance d’association du tracker |
+| `YOLO_NEW_TRACK_CONFIDENCE` | `0.25` | Confiance minimale pour créer un nouvel ID |
+| `YOLO_TRACK_MATCH_THRESHOLD` | `0.80` | Tolérance d’association du tracker |
 | `YOLO_TRACK_BUFFER_SECONDS` | `5.0` | Durée de conservation d’une piste brièvement perdue |
 | `YOLO_PLAYER_CLASS_IDS` | `2` | IDs numériques des classes joueur, séparés par des virgules |
 | `YOLO_GOALKEEPER_CLASS_IDS` | vide | IDs numériques des classes gardien |

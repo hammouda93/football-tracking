@@ -77,7 +77,16 @@ class PeriodDetector:
                 raw_blocks.append(TimeSpan(current_start, end_ms, score, "field_block"))
                 block_scores.append(score)
 
-        periods = self._select_two_halves(raw_blocks, duration_ms)
+        central_break = self._select_central_break(
+            signals,
+            duration_ms,
+            sample_interval,
+        )
+        periods = (
+            central_break[0]
+            if central_break is not None
+            else self._select_two_halves(raw_blocks, duration_ms)
+        )
         if len(periods) != 2:
             fallback = self._fallback(duration_ms, "unable_to_isolate_two_halves")
             fallback.active_blocks = raw_blocks
@@ -85,19 +94,184 @@ class PeriodDetector:
 
         confidence = min(period.confidence for period in periods)
         separation = periods[1].start_ms - periods[0].end_ms
-        confidence *= min(1.0, max(0.35, separation / (8 * 60_000)))
+        if central_break is not None:
+            confidence *= min(1.0, max(0.65, separation / 120_000))
+        else:
+            confidence *= min(1.0, max(0.35, separation / (8 * 60_000)))
+        diagnostics = {
+            "sample_interval_ms": sample_interval,
+            "field_threshold": self.field_threshold,
+            "halftime_gap_ms": separation,
+            "block_count": len(raw_blocks),
+            "detection_method": (
+                "central_broadcast_break"
+                if central_break is not None
+                else "field_blocks"
+            ),
+        }
+        if central_break is not None:
+            diagnostics.update(central_break[1])
         return PeriodDetectionResult(
             periods=periods,
             active_blocks=raw_blocks,
             confidence=round(confidence, 4),
             requires_review=confidence < 0.86,
-            diagnostics={
-                "sample_interval_ms": sample_interval,
-                "field_threshold": self.field_threshold,
-                "halftime_gap_ms": separation,
-                "block_count": len(raw_blocks),
-            },
+            diagnostics=diagnostics,
         )
+
+    def _select_central_break(
+        self,
+        signals: list[FrameSignal],
+        duration_ms: int,
+        sample_interval: int,
+    ) -> tuple[list[TimeSpan], dict] | None:
+        """Find a short edited half-time break around the middle of a broadcast.
+
+        Some source videos remove almost the entire half-time interval. Their break
+        lasts less than the normal field-block bridge, so it must be detected from
+        consecutive non-field samples near the centre of the recording.
+        """
+
+        if len(signals) < 8 or duration_ms <= 0:
+            return None
+
+        search_start = int(duration_ms * 0.35)
+        search_end = int(duration_ms * 0.65)
+        inactive_runs: list[tuple[int, int]] = []
+        run_start: int | None = None
+        for index, signal in enumerate(signals):
+            is_candidate = (
+                search_start <= signal.timestamp_ms <= search_end
+                and signal.field_score < self.field_threshold
+            )
+            if is_candidate and run_start is None:
+                run_start = index
+            elif not is_candidate and run_start is not None:
+                inactive_runs.append((run_start, index - 1))
+                run_start = None
+        if run_start is not None:
+            inactive_runs.append((run_start, len(signals) - 1))
+
+        candidates: list[tuple[float, int, int, int, int, float, float]] = []
+        minimum_gap = max(20_000, int(sample_interval * 1.8))
+        midpoint = duration_ms / 2.0
+        search_radius = max(1.0, duration_ms * 0.15)
+        for start_index, end_index in inactive_runs:
+            before_index = start_index - 1
+            after_index = end_index + 1
+            if before_index < 0 or after_index >= len(signals):
+                continue
+            before = signals[before_index]
+            after = signals[after_index]
+            if (
+                before.field_score < self.field_threshold
+                or after.field_score < self.field_threshold
+            ):
+                continue
+            separation = after.timestamp_ms - before.timestamp_ms
+            if separation < minimum_gap or separation > 20 * 60_000:
+                continue
+
+            support_window = 4 * 60_000
+            before_support = [
+                signal
+                for signal in signals
+                if before.timestamp_ms - support_window
+                <= signal.timestamp_ms
+                <= before.timestamp_ms
+            ]
+            after_support = [
+                signal
+                for signal in signals
+                if after.timestamp_ms
+                <= signal.timestamp_ms
+                <= after.timestamp_ms + support_window
+            ]
+            before_ratio = self._field_ratio(before_support)
+            after_ratio = self._field_ratio(after_support)
+            if min(before_ratio, after_ratio) < 0.45:
+                continue
+
+            break_midpoint = (before.timestamp_ms + after.timestamp_ms) / 2.0
+            centrality = max(0.0, 1.0 - abs(break_midpoint - midpoint) / search_radius)
+            duration_score = min(1.0, separation / 120_000)
+            support_score = (before_ratio + after_ratio) / 2.0
+            score = centrality * 0.55 + duration_score * 0.25 + support_score * 0.20
+            candidates.append(
+                (
+                    score,
+                    before_index,
+                    after_index,
+                    before.timestamp_ms,
+                    after.timestamp_ms,
+                    before_ratio,
+                    after_ratio,
+                )
+            )
+
+        if not candidates:
+            return None
+
+        (
+            score,
+            before_index,
+            after_index,
+            first_end,
+            second_start,
+            before_ratio,
+            after_ratio,
+        ) = max(candidates, key=lambda item: item[0])
+        first_field = next(
+            (
+                signal
+                for signal in signals[: before_index + 1]
+                if signal.field_score >= self.field_threshold
+            ),
+            None,
+        )
+        second_field_signals = [
+            signal
+            for signal in signals[after_index:]
+            if signal.field_score >= self.field_threshold
+        ]
+        if first_field is None or not second_field_signals:
+            return None
+        second_end = min(
+            duration_ms,
+            second_field_signals[-1].timestamp_ms + sample_interval,
+        )
+        if first_end - first_field.timestamp_ms < 30 * 60_000:
+            return None
+        if second_end - second_start < 30 * 60_000:
+            return None
+
+        period_confidence = min(0.85, 0.55 + score * 0.30)
+        periods = [
+            TimeSpan(
+                first_field.timestamp_ms,
+                first_end,
+                period_confidence,
+                "1re mi-temps",
+            ),
+            TimeSpan(
+                second_start,
+                second_end,
+                period_confidence,
+                "2e mi-temps",
+            ),
+        ]
+        return periods, {
+            "central_break_score": round(score, 4),
+            "field_ratio_before_break": round(before_ratio, 4),
+            "field_ratio_after_break": round(after_ratio, 4),
+        }
+
+    def _field_ratio(self, signals: list[FrameSignal]) -> float:
+        if not signals:
+            return 0.0
+        return sum(
+            signal.field_score >= self.field_threshold for signal in signals
+        ) / len(signals)
 
     def _select_two_halves(self, blocks: list[TimeSpan], duration_ms: int) -> list[TimeSpan]:
         if len(blocks) >= 2:
