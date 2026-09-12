@@ -310,7 +310,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
     match.status = Match.Status.QUEUED
     match.save(update_fields=["status", "updated_at"])
     labels = {
-        "prepare": "Préparation des mi-temps",
+        "prepare": "Détection automatique des mi-temps",
         "sample": "Test rapide de 2 minutes",
         "full": "Analyse complète",
     }

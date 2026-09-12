@@ -216,7 +216,7 @@ class MatchAnalysisRunner:
     def _periods(self, signals, duration_ms: int) -> list[MatchPeriod]:
         self._stage(AnalysisRun.Stage.PERIODS, 16)
         confirmed = list(self.match.periods.filter(confirmed=True).order_by("number"))
-        if len(confirmed) == 2:
+        if len(confirmed) == 2 and self.analysis_mode != "prepare":
             periods = confirmed
             payload = {
                 "source": "confirmed",
@@ -225,6 +225,10 @@ class MatchAnalysisRunner:
             }
         else:
             detection = PeriodDetector().detect(signals, duration_ms)
+            existing_bounds = {
+                period.number: (period.video_start_ms, period.video_end_ms)
+                for period in self.match.periods.filter(number__in=(1, 2))
+            }
             periods = []
             for index, span in enumerate(detection.periods, start=1):
                 clock_start = 0 if index == 1 else 2_700_000
@@ -243,6 +247,12 @@ class MatchAnalysisRunner:
                     },
                 )
                 periods.append(period)
+            new_bounds = {
+                period.number: (period.video_start_ms, period.video_end_ms)
+                for period in periods
+            }
+            if existing_bounds and existing_bounds != new_bounds:
+                self._invalidate_previous_samples()
             payload = detection.to_dict()
         _save_json_artifact(
             self.run,
@@ -254,6 +264,21 @@ class MatchAnalysisRunner:
         if len(periods) != 2:
             raise RuntimeError("Deux mi-temps valides sont nécessaires pour analyser le match.")
         return periods
+
+    def _invalidate_previous_samples(self) -> None:
+        sample_runs = self.match.analysis_runs.exclude(pk=self.run.pk).order_by(
+            "-created_at"
+        )[:25]
+        for sample_run in sample_runs:
+            if str((sample_run.config or {}).get("analysis_mode")) != "sample":
+                continue
+            metrics = dict(sample_run.metrics or {})
+            diagnostics = dict(metrics.get("diagnostics") or {})
+            diagnostics["periods_changed_since_run"] = True
+            diagnostics["manual_approved"] = False
+            metrics["diagnostics"] = diagnostics
+            sample_run.metrics = metrics
+            sample_run.save(update_fields=["metrics"])
 
     def _track(self, periods: list[MatchPeriod], metadata) -> dict:
         self._stage(AnalysisRun.Stage.TRACKING, 22)
@@ -313,15 +338,15 @@ class MatchAnalysisRunner:
             ball_confidence=float(self.config.get("yolo_ball_confidence", 0.12)),
             image_size=int(self.config.get("yolo_image_size", 1280)),
             tracking_fps=tracking_fps,
-            tracker_name=str(self.config.get("yolo_tracker", "botsort")),
+            tracker_name=str(self.config.get("yolo_tracker", "bytetrack")),
             tracker_low_confidence=float(
                 self.config.get("yolo_track_low_confidence", 0.10)
             ),
             tracker_new_confidence=float(
-                self.config.get("yolo_new_track_confidence", 0.35)
+                self.config.get("yolo_new_track_confidence", 0.25)
             ),
             tracker_match_threshold=float(
-                self.config.get("yolo_track_match_threshold", 0.85)
+                self.config.get("yolo_track_match_threshold", 0.80)
             ),
             tracker_buffer_seconds=float(
                 self.config.get("yolo_track_buffer_seconds", 5.0)
@@ -353,7 +378,7 @@ class MatchAnalysisRunner:
         diagnostic_counts: Counter = Counter()
         team_observations: Counter = Counter()
         model_classes: dict[str, str] = {}
-        tracker_name = str(self.config.get("yolo_tracker", "botsort"))
+        tracker_name = str(self.config.get("yolo_tracker", "bytetrack"))
         preview_artifacts: list[dict] = []
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
@@ -433,9 +458,7 @@ class MatchAnalysisRunner:
                         for athlete in analysis.athletes:
                             team_observations[athlete.team_key or "unknown"] += 1
                         analysis.diagnostics.pop("raw_athlete_boxes", None)
-                        rejected_person_boxes = analysis.diagnostics.pop(
-                            "rejected_person_boxes", []
-                        )
+                        analysis.diagnostics.pop("rejected_person_boxes", None)
                         if (
                             self.analysis_mode == "sample"
                             and not preview_saved
@@ -448,7 +471,6 @@ class MatchAnalysisRunner:
                                 frame,
                                 analysis,
                                 preview_path,
-                                rejected_person_boxes=rejected_person_boxes,
                                 team_labels={
                                     "home": f"{self._team_code(self.match.home_team)} (T1)",
                                     "away": f"{self._team_code(self.match.away_team)} (T2)",
@@ -604,7 +626,6 @@ class MatchAnalysisRunner:
         analysis: FrameAnalysis,
         output_path: Path,
         *,
-        rejected_person_boxes: list[list[float]] | None = None,
         team_labels: dict[str, str] | None = None,
     ) -> None:
         import cv2
@@ -617,21 +638,7 @@ class MatchAnalysisRunner:
             "ball": (255, 255, 255),
             "goalkeeper": (255, 175, 50),
             "referee": (255, 220, 70),
-            "rejected": (115, 115, 115),
         }
-        for rejected_box in rejected_person_boxes or []:
-            x1, y1, x2, y2 = (int(value) for value in rejected_box)
-            cv2.rectangle(preview, (x1, y1), (x2, y2), colors["rejected"], 1)
-            cv2.putText(
-                preview,
-                "HORS TERRAIN / REJET",
-                (x1, max(18, y1 - 5)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.34,
-                colors["rejected"],
-                1,
-                cv2.LINE_AA,
-            )
         for obj in analysis.objects:
             x1, y1, x2, y2 = (int(value) for value in obj.bbox_xyxy)
             is_ball = obj.role == ObjectRole.BALL
@@ -667,7 +674,7 @@ class MatchAnalysisRunner:
         cv2.rectangle(preview, (8, 8), (760, 58), (20, 20, 20), -1)
         cv2.putText(
             preview,
-            "GRIS=HORS TERRAIN/REJET | SEULS LES OBJETS SUIVIS SONT AFFICHES",
+            "TOUS JOUEURS / GARDIENS / ARBITRES DETECTES -> TRACKER",
             (18, 27),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.44,
