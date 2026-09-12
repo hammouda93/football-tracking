@@ -67,6 +67,10 @@ class Player(models.Model):
 
 
 class Match(models.Model):
+    class TeamCluster(models.TextChoices):
+        A = "A", "Groupe A"
+        B = "B", "Groupe B"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Brouillon"
         UPLOADED = "uploaded", "Vidéo importée"
@@ -85,6 +89,13 @@ class Match(models.Model):
     status = models.CharField(max_length=24, choices=Status.choices, default=Status.DRAFT)
     home_score = models.PositiveSmallIntegerField(default=0)
     away_score = models.PositiveSmallIntegerField(default=0)
+    # The visual groups are learned from the video. This field only says which
+    # learned group belongs to the home club; it never contains a color.
+    home_team_cluster = models.CharField(
+        max_length=1,
+        choices=TeamCluster.choices,
+        default=TeamCluster.B,
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

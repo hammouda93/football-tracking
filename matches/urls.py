@@ -10,6 +10,11 @@ urlpatterns = [
     path("matches/<uuid:pk>/video/", views.stream_match_video, name="match-video-stream"),
     path("matches/<uuid:pk>/analyse/", views.start_analysis, name="match-start-analysis"),
     path("matches/<uuid:pk>/periods/", views.update_periods, name="match-update-periods"),
+    path(
+        "matches/<uuid:pk>/team-clusters/swap/",
+        views.swap_team_clusters,
+        name="match-swap-team-clusters",
+    ),
     path("matches/<uuid:pk>/players/add/", views.add_player, name="match-add-player"),
     path("matches/<uuid:pk>/roster/import/", views.import_roster, name="match-import-roster"),
     path("matches/<uuid:pk>/export/events.csv", views.export_events_csv, name="match-export-events"),

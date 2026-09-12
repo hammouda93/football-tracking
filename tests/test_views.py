@@ -93,6 +93,7 @@ class DashboardTests(TestCase):
         self.assertEqual(run.config["yolo_player_class_ids"], [2])
         self.assertEqual(run.config["yolo_goalkeeper_class_ids"], [1])
         self.assertEqual(run.config["yolo_ball_class_ids"], [0])
+        self.assertEqual(run.config["home_team_cluster"], "B")
 
     def test_reference_run_uses_eight_five_second_windows(self):
         home = Team.objects.create(name="Home", short_name="HOM")
@@ -119,6 +120,38 @@ class DashboardTests(TestCase):
         self.assertEqual(run.config["sample_window_seconds"], 5)
         self.assertEqual(run.config["sample_windows_per_half"], 4)
         self.assertFalse(run.config["render_clips"])
+
+    def test_team_cluster_mapping_can_be_swapped_without_changing_team_colors(self):
+        home = Team.objects.create(
+            name="Stade Tunisien", short_name="STA", primary_color="#A54840"
+        )
+        away = Team.objects.create(
+            name="Club Sportif Sfaxien", short_name="CSS", primary_color="#F3F2F8"
+        )
+        match = Match.objects.create(home_team=home, away_team=away)
+        sample = AnalysisRun.objects.create(
+            match=match,
+            status=AnalysisRun.Status.REVIEW,
+            config={"analysis_mode": "sample", "home_team_cluster": "B"},
+            metrics={
+                "diagnostics": {"verdict": "pass", "manual_approved": True}
+            },
+        )
+
+        response = self.client.post(
+            reverse("match-swap-team-clusters", kwargs={"pk": match.pk})
+        )
+
+        self.assertRedirects(response, match.get_absolute_url())
+        match.refresh_from_db()
+        sample.refresh_from_db()
+        self.assertEqual(match.home_team_cluster, "A")
+        self.assertEqual(home.primary_color, "#A54840")
+        self.assertEqual(away.primary_color, "#F3F2F8")
+        self.assertTrue(
+            sample.metrics["diagnostics"]["team_mapping_changed_since_run"]
+        )
+        self.assertFalse(sample.metrics["diagnostics"]["manual_approved"])
 
     def test_live_preview_endpoint_returns_latest_jpeg_without_cache(self):
         home = Team.objects.create(name="Home", short_name="HOM")

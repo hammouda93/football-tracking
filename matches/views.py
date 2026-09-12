@@ -55,8 +55,10 @@ def _passing_sample_run(match: Match) -> AnalysisRun | None:
         approved = diagnostics.get("verdict") == "pass" or diagnostics.get(
             "manual_approved", False
         )
-        periods_current = not diagnostics.get("periods_changed_since_run", False)
-        if terminal and approved and periods_current:
+        configuration_current = not diagnostics.get(
+            "periods_changed_since_run", False
+        ) and not diagnostics.get("team_mapping_changed_since_run", False)
+        if terminal and approved and configuration_current:
             return run
     return None
 
@@ -176,6 +178,12 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
         ),
         "periods_confirmed": len(periods) == 2 and all(period.confirmed for period in periods),
         "sample_ready": _passing_sample_run(match) is not None,
+        "home_team_cluster": match.home_team_cluster,
+        "away_team_cluster": (
+            Match.TeamCluster.B
+            if match.home_team_cluster == Match.TeamCluster.A
+            else Match.TeamCluster.A
+        ),
         "show_match_results": show_match_results,
         "events": events[:500],
         "event_types": Event.Type.choices,
@@ -312,6 +320,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_goalkeeper_class_ids": settings.YOLO_GOALKEEPER_CLASS_IDS,
             "yolo_referee_class_ids": settings.YOLO_REFEREE_CLASS_IDS,
             "yolo_ball_class_ids": settings.YOLO_BALL_CLASS_IDS,
+            "home_team_cluster": match.home_team_cluster,
             "sample_window_seconds": 5 if mode == "reference" else 60,
             "sample_windows_per_half": 4 if mode == "reference" else 1,
             "render_clips": mode == "full",
@@ -326,6 +335,34 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
         "full": "Analyse complète",
     }
     messages.success(request, f"{labels[mode]} · {str(run.pk)[:8]} mis en file.")
+    return redirect(match)
+
+
+@require_POST
+def swap_team_clusters(request: HttpRequest, pk) -> HttpResponse:
+    match = get_object_or_404(Match, pk=pk)
+    match.home_team_cluster = (
+        Match.TeamCluster.B
+        if match.home_team_cluster == Match.TeamCluster.A
+        else Match.TeamCluster.A
+    )
+    match.save(update_fields=["home_team_cluster", "updated_at"])
+
+    for run in match.analysis_runs.all()[:25]:
+        if _run_mode(run) != "sample" or not run.metrics:
+            continue
+        metrics = dict(run.metrics)
+        diagnostics = dict(metrics.get("diagnostics") or {})
+        diagnostics["team_mapping_changed_since_run"] = True
+        diagnostics["manual_approved"] = False
+        metrics["diagnostics"] = diagnostics
+        run.metrics = metrics
+        run.save(update_fields=["metrics"])
+
+    messages.success(
+        request,
+        "Correspondance des groupes A/B inversée. Relance la référence 40 s.",
+    )
     return redirect(match)
 
 

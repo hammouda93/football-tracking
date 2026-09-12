@@ -48,6 +48,7 @@ class YoloVisionProvider(VisionProvider):
         referee_class_ids: list[int] | tuple[int, ...] | None = None,
         ball_class_ids: list[int] | tuple[int, ...] | None = None,
         team_colors: dict[str, str] | None = None,
+        home_team_cluster: str = "B",
         **_: object,
     ):
         if not Path(model_path).exists():
@@ -112,13 +113,13 @@ class YoloVisionProvider(VisionProvider):
         self._register_class_ids(goalkeeper_class_ids, ObjectRole.GOALKEEPER)
         self._register_class_ids(referee_class_ids, ObjectRole.REFEREE)
         self._register_class_ids(ball_class_ids, ObjectRole.BALL)
-        self.team_colors = {
-            key: self._hex_to_lab(value) for key, value in (team_colors or {}).items()
-        }
-        self.team_reference_features = {
-            key: self._hex_to_team_feature(value)
-            for key, value in (team_colors or {}).items()
-        }
+        # ``team_colors`` is intentionally ignored. Club colors entered during
+        # upload are presentation data, not vision inputs. Like the standalone
+        # main.py prototype, the two jersey groups are learned from video crops.
+        del team_colors
+        self.home_team_cluster = (
+            "A" if str(home_team_cluster).strip().upper() == "A" else "B"
+        )
         self.team_color_samples: list[np.ndarray] = []
         self.team_cluster_centers: np.ndarray | None = None
         self.team_cluster_mapping: dict[int, str] = {}
@@ -602,7 +603,7 @@ class YoloVisionProvider(VisionProvider):
 
     def _stabilize_team(self, tracker_id: int, observed_team: str | None) -> str | None:
         votes = self.team_votes.setdefault(int(tracker_id), Counter())
-        if observed_team in self.team_colors:
+        if observed_team in {"home", "away"}:
             votes[observed_team] += 1
         if not votes:
             return None
@@ -682,13 +683,7 @@ class YoloVisionProvider(VisionProvider):
         return field_score, scene_cut
 
     def _classify_team(self, frame, box: tuple[float, float, float, float]) -> str | None:
-        """Classify a jersey against two automatically learned match clusters.
-
-        The match colors are used only once to name the learned clusters home and
-        away. Per-frame classification compares the torso with those learned
-        broadcast colors, which is much more robust to shadows and compression
-        than comparing every crop directly with an exported CSS color.
-        """
+        """Classify a torso against two jersey groups learned only from video."""
 
         feature = self._extract_team_feature(frame, box)
         if feature is None:
@@ -713,40 +708,22 @@ class YoloVisionProvider(VisionProvider):
         x1, y1, x2, y2 = box
         box_height = max(1.0, y2 - y1)
         box_width = max(1.0, x2 - x1)
-        left = max(0, min(width - 1, int(x1 + box_width * 0.25)))
-        right = max(left + 1, min(width, int(x2 - box_width * 0.25)))
-        top = max(0, min(height - 1, int(y1 + box_height * 0.16)))
-        bottom = max(top + 1, min(height, int(y1 + box_height * 0.55)))
+        # Exact central-torso proportions used by the proven main.py
+        # TeamClassifier: upper 20%-50%, central 30%-70% width.
+        left = max(0, min(width - 1, int(x1 + box_width * 0.30)))
+        right = max(left + 1, min(width, int(x1 + box_width * 0.70)))
+        top = max(0, min(height - 1, int(y1 + box_height * 0.20)))
+        bottom = max(top + 1, min(height, int(y1 + box_height * 0.50)))
         crop = frame[top:bottom, left:right]
         if crop.size == 0:
             return None
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).reshape(-1, 3)
-        green = (
-            (hsv[:, 0] >= 25)
-            & (hsv[:, 0] <= 100)
-            & (hsv[:, 1] >= 20)
-        )
-        usable = (~green) & (hsv[:, 2] >= 18)
-        pixels = hsv[usable]
-        if len(pixels) < 8:
-            pixels = hsv[hsv[:, 2] >= 18]
-        if len(pixels) < 8:
-            return None
-
-        hues = pixels[:, 0].astype(np.float64)
-        saturations = pixels[:, 1].astype(np.float64)
-        values = pixels[:, 2].astype(np.float64)
-        angles = hues * (2.0 * math.pi / 180.0)
-        # Low-saturation white/gray pixels have an unstable hue, so they carry
-        # less angular weight than a saturated red/black jersey.
-        hue_weights = np.maximum(0.15, saturations / 255.0)
-        mean_sin = float(np.average(np.sin(angles), weights=hue_weights))
-        mean_cos = float(np.average(np.cos(angles), weights=hue_weights))
-        hue = (math.atan2(mean_sin, mean_cos) * 180.0 / (2.0 * math.pi)) % 180.0
-        return self._team_feature(
-            hue,
-            float(np.median(saturations)),
-            float(np.median(values)),
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        return np.asarray(
+            [
+                float(np.median(hsv[:, :, 0])),
+                float(np.median(hsv[:, :, 1])),
+            ],
+            dtype=np.float32,
         )
 
     def _observe_team_feature(self, feature: np.ndarray) -> None:
@@ -780,6 +757,14 @@ class YoloVisionProvider(VisionProvider):
         if float(np.linalg.norm(centers[0] - centers[1])) < 12.0:
             return
 
+        # OpenCV's numeric cluster IDs are arbitrary. Canonical group A is the
+        # lower-saturation (then lower-hue) center, making A/B stable across
+        # reference, validation and full runs without using a club color.
+        order = sorted(
+            range(2),
+            key=lambda index: (float(centers[index][1]), float(centers[index][0])),
+        )
+        centers = centers[order]
         mapping, margin = self._map_team_clusters(centers)
         if len(mapping) != 2:
             return
@@ -790,27 +775,23 @@ class YoloVisionProvider(VisionProvider):
         self.team_calibration_fits += 1
 
     def _map_team_clusters(self, centers: np.ndarray) -> tuple[dict[int, str], float]:
-        if not {"home", "away"}.issubset(self.team_reference_features):
-            return {}, 0.0
-        home = self.team_reference_features["home"]
-        away = self.team_reference_features["away"]
-        direct = float(np.linalg.norm(centers[0] - home)) + float(
-            np.linalg.norm(centers[1] - away)
+        home_index = 0 if self.home_team_cluster == "A" else 1
+        away_index = 1 - home_index
+        return (
+            {home_index: "home", away_index: "away"},
+            float(np.linalg.norm(centers[0] - centers[1])),
         )
-        swapped = float(np.linalg.norm(centers[0] - away)) + float(
-            np.linalg.norm(centers[1] - home)
-        )
-        if direct <= swapped:
-            return {0: "home", 1: "away"}, swapped - direct
-        return {0: "away", 1: "home"}, direct - swapped
 
     def team_calibration_diagnostics(self) -> dict:
         return {
             "method": "automatic_jersey_clusters",
+            "source": "video_only",
             "status": "ready" if self.team_cluster_centers is not None else "collecting",
             "samples": len(self.team_color_samples),
             "fits": self.team_calibration_fits,
             "mapping": dict(self.team_cluster_mapping),
+            "home_group": self.home_team_cluster,
+            "away_group": "B" if self.home_team_cluster == "A" else "A",
             "mapping_margin": round(self.team_calibration_mapping_margin, 2),
         }
 
@@ -818,36 +799,3 @@ class YoloVisionProvider(VisionProvider):
     def _role(name: str) -> ObjectRole:
         normalized = str(name).strip().lower().replace("_", "-")
         return ROLE_ALIASES.get(normalized, ObjectRole.OTHER)
-
-    @staticmethod
-    def _hex_to_lab(value: str):
-        import cv2
-
-        value = value.lstrip("#")
-        red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
-        pixel = np.uint8([[[blue, green, red]]])
-        return cv2.cvtColor(pixel, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float64)
-
-    @staticmethod
-    def _team_feature(hue: float, saturation: float, value: float) -> np.ndarray:
-        angle = float(hue) * (2.0 * math.pi / 180.0)
-        hue_weight = 10.0 + 35.0 * max(0.0, min(1.0, float(saturation) / 255.0))
-        return np.asarray(
-            [
-                math.cos(angle) * hue_weight,
-                math.sin(angle) * hue_weight,
-                float(saturation) / 4.0,
-                float(value) / 8.0,
-            ],
-            dtype=np.float32,
-        )
-
-    @classmethod
-    def _hex_to_team_feature(cls, value: str) -> np.ndarray:
-        import cv2
-
-        value = value.lstrip("#")
-        red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
-        pixel = np.uint8([[[blue, green, red]]])
-        hue, saturation, brightness = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
-        return cls._team_feature(float(hue), float(saturation), float(brightness))
