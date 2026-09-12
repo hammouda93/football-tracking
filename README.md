@@ -97,7 +97,7 @@ Le serveur Django et le worker sont volontairement séparés : l’interface res
 2. Importer chaque effectif en CSV (`name,shirt_number,position`).
 3. Cliquer sur **1. Détecter/recalculer les mi-temps**. La coupure centrale est proposée automatiquement ; vérifier puis confirmer les quatre limites vidéo modifiables.
 4. Lancer **2a. Référence main.py · 40 s**. Il contrôle huit séquences de 5 secondes réparties dans les deux mi-temps. Chaque aperçu compare la sortie YOLO brute à gauche et le tracking réellement utilisé à droite.
-5. Lancer ensuite **2b. Test de validation · 2 min**. Il applique exactement le même moteur sur huit séquences de 15 secondes et mesure le ballon visible, les joueurs par image, l’équilibre des équipes et la fragmentation des pistes. Ces deux tests affichent aussi le tracking annoté en direct dans la page.
+5. Lancer ensuite **2b. Test de validation · 2 min**. Il applique exactement le même moteur sur deux séquences continues de 60 secondes, une par mi-temps, et mesure le ballon visible, les joueurs par image, l’équilibre des équipes et la fragmentation des pistes. Ces deux tests affichent le tracking dans la page et dans une fenêtre OpenCV fluide sous Windows. `ESC` annule le test.
 6. Ne lancer **3. Analyse complète** que si le test de 2 minutes est validé. Le bouton reste verrouillé si le socle visuel échoue.
 7. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
 8. Valider ou corriger les actions en regardant le clip ou le timecode, puis exporter les résultats.
@@ -120,10 +120,11 @@ Les valeurs se trouvent dans `.env` :
 | `ANALYSIS_TRACKING_FPS` | `12.5` | Images analysées par seconde |
 | `ANALYSIS_MIN_YOLO_TRACKING_FPS` | `12.5` | Cadence du profil de référence, équivalente à une image sur deux à 25 FPS |
 | `ANALYSIS_DEVICE` | `cpu` | `cpu`, `0`, `cuda:0`, selon Ultralytics |
+| `ANALYSIS_LIVE_WINDOW` | `1` sous Windows | Fenêtre OpenCV fluide pendant les tests courts |
 | `YOLO_PROFILE` | `main_py` | `main_py` reproduit le prototype validé ; `advanced` réactive les réglages indépendants |
 | `YOLO_MODEL_PATH` | `models/football-players.pt` | Poids locaux |
 | `YOLO_CONFIDENCE` | `0.30` | Seuil de détection |
-| `YOLO_BALL_CONFIDENCE` | `0.30` | Seuil du ballon dans le profil de référence |
+| `YOLO_BALL_CONFIDENCE` | `0.12` | Seuil séparé du petit ballon ; les joueurs restent à `0.30` |
 | `YOLO_IMAGE_SIZE` | `640` | Résolution d’inférence du prototype `main.py` |
 | `YOLO_TRACKER` | `bytetrack` | Profil historique qui conserve le mieux les joueurs ; `botsort` reste disponible |
 | `YOLO_TRACK_LOW_CONFIDENCE` | `0.30` | Seuil réellement envoyé à ByteTrack dans le profil de référence |
@@ -131,7 +132,7 @@ Les valeurs se trouvent dans `.env` :
 | `YOLO_TRACK_MATCH_THRESHOLD` | `0.80` | Tolérance d’association du tracker |
 | `YOLO_TRACK_BUFFER_SECONDS` | `5.0` | Durée de conservation d’une piste brièvement perdue |
 | `YOLO_PLAYER_CLASS_IDS` | `2` | IDs numériques des classes joueur, séparés par des virgules |
-| `YOLO_GOALKEEPER_CLASS_IDS` | vide | IDs numériques des classes gardien |
+| `YOLO_GOALKEEPER_CLASS_IDS` | `1` | IDs numériques des classes gardien |
 | `YOLO_REFEREE_CLASS_IDS` | `3` | IDs numériques des classes arbitre |
 | `YOLO_BALL_CLASS_IDS` | `0` | IDs numériques des classes ballon |
 | `FFMPEG_BINARY` | `ffmpeg` | Binaire FFmpeg |

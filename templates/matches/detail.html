@@ -49,6 +49,7 @@
         <div><strong>{{ sample_diagnostics.frames_analyzed }}</strong><small>images analysées</small></div>
         <div><strong>{{ sample_diagnostics.average_player_detections_per_frame|default:0|floatformat:1 }}</strong><small>détections YOLO / image</small></div>
         <div><strong>{{ sample_diagnostics.average_tracked_athletes_per_frame|default:0|floatformat:1 }}</strong><small>joueurs suivis / image</small></div>
+        <div><strong>{{ sample_diagnostics.tracker_retention_pct|default:0|floatformat:1 }}%</strong><small>détections gardées par le tracker</small></div>
         <div><strong>{{ sample_diagnostics.ball_visibility_pct|floatformat:1 }}%</strong><small>ballon visible</small></div>
         <div><strong>{{ sample_diagnostics.playable_candidate_pct|floatformat:1 }}%</strong><small>jeu effectif candidat</small></div>
         <div><strong>{{ sample_diagnostics.tracks_per_minute|floatformat:1 }}</strong><small>pistes / minute</small></div>
@@ -60,6 +61,7 @@
         {% if sample_diagnostics.raw_ball_detections %}<div><strong>{{ sample_diagnostics.raw_ball_detections }}</strong><small>candidats ballon bruts</small></div>{% endif %}
       </div>
       <p class="diagnostic-note"><strong>Profil exécuté :</strong> <code>{{ sample_diagnostics.profile|default:"—" }}</code> · <code>imgsz={{ sample_diagnostics.image_size }}</code> · <code>conf={{ sample_diagnostics.detector_confidence }}</code> · <code>ball={{ sample_diagnostics.ball_confidence }}</code> · <code>{{ sample_diagnostics.tracker|upper }} {{ sample_diagnostics.tracker_frame_rate }} FPS</code>. Chaque aperçu montre la détection brute à gauche et les objets réellement transmis à l’analyse à droite.</p>
+      {% if sample_diagnostics.team_calibration %}<p class="diagnostic-note"><strong>Calibration automatique des maillots :</strong> {{ sample_diagnostics.team_calibration.status|default:"collecting" }} · {{ sample_diagnostics.team_calibration.samples|default:0 }} observations · correspondance {{ sample_diagnostics.team_calibration.mapping|default:"—" }}.</p>{% endif %}
       {% if sample_previews %}<div class="sample-preview-grid">{% for preview in sample_previews %}<figure><a href="{{ preview.url }}" target="_blank"><img src="{{ preview.url }}" alt="Aperçu annoté MT{{ preview.period }} séquence {{ preview.window }}"></a><figcaption>MT{{ preview.period }} · {{ preview.video_time_ms|timecode }}</figcaption></figure>{% endfor %}</div>{% endif %}
       {% if sample_diagnostics.issues %}<ul class="diagnostic-issues">{% for issue in sample_diagnostics.issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% endif %}
       {% if sample_diagnostics.model_classes %}<p class="diagnostic-note"><strong>Classes lues dans le modèle :</strong> {% for class_id,class_name in sample_diagnostics.model_classes.items %}<code>{{ class_id }}={{ class_name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}</p>{% endif %}

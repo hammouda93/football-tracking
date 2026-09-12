@@ -95,6 +95,10 @@ ANALYSIS_MIN_YOLO_TRACKING_FPS = float(
     os.getenv("ANALYSIS_MIN_YOLO_TRACKING_FPS", "8.0")
 )
 ANALYSIS_DEVICE = os.getenv("ANALYSIS_DEVICE", "cpu")
+ANALYSIS_LIVE_WINDOW = os.getenv(
+    "ANALYSIS_LIVE_WINDOW",
+    "1" if os.name == "nt" and DEBUG else "0",
+) == "1"
 YOLO_PROFILE = os.getenv("YOLO_PROFILE", "main_py").strip().lower()
 if YOLO_PROFILE not in {"main_py", "advanced"}:
     raise ValueError("YOLO_PROFILE doit valoir main_py ou advanced.")
@@ -113,7 +117,7 @@ YOLO_NEW_TRACK_CONFIDENCE = float(os.getenv("YOLO_NEW_TRACK_CONFIDENCE", "0.25")
 YOLO_TRACK_MATCH_THRESHOLD = float(os.getenv("YOLO_TRACK_MATCH_THRESHOLD", "0.80"))
 YOLO_TRACK_BUFFER_SECONDS = float(os.getenv("YOLO_TRACK_BUFFER_SECONDS", "5.0"))
 YOLO_PLAYER_CLASS_IDS = _csv_ints("YOLO_PLAYER_CLASS_IDS", "2")
-YOLO_GOALKEEPER_CLASS_IDS = _csv_ints("YOLO_GOALKEEPER_CLASS_IDS")
+YOLO_GOALKEEPER_CLASS_IDS = _csv_ints("YOLO_GOALKEEPER_CLASS_IDS", "1")
 YOLO_REFEREE_CLASS_IDS = _csv_ints("YOLO_REFEREE_CLASS_IDS", "3")
 YOLO_BALL_CLASS_IDS = _csv_ints("YOLO_BALL_CLASS_IDS", "0")
 
@@ -124,7 +128,9 @@ YOLO_BALL_CLASS_IDS = _csv_ints("YOLO_BALL_CLASS_IDS", "0")
 if YOLO_PROFILE == "main_py":
     ANALYSIS_MIN_YOLO_TRACKING_FPS = 12.5
     YOLO_CONFIDENCE = 0.30
-    YOLO_BALL_CONFIDENCE = 0.30
+    # Keep the validated player path at 0.30 while admitting small, weaker ball
+    # candidates for the dedicated temporal selector.
+    YOLO_BALL_CONFIDENCE = 0.12
     YOLO_IMAGE_SIZE = 640
     YOLO_TRACKER = "bytetrack"
     YOLO_TRACK_LOW_CONFIDENCE = 0.30

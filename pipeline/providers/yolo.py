@@ -70,7 +70,7 @@ class YoloVisionProvider(VisionProvider):
             )
         if self.profile == "main_py":
             confidence = 0.30
-            ball_confidence = 0.30
+            ball_confidence = 0.12
             image_size = 640
             tracker_name = "bytetrack"
             tracker_low_confidence = 0.30
@@ -92,7 +92,7 @@ class YoloVisionProvider(VisionProvider):
             0.01, min(float(tracker_low_confidence), float(confidence))
         )
         self.ball_confidence = max(
-            self.tracker_low_confidence,
+            0.01,
             min(float(ball_confidence), float(confidence)),
         )
         self.tracker_new_confidence = max(
@@ -115,11 +115,22 @@ class YoloVisionProvider(VisionProvider):
         self.team_colors = {
             key: self._hex_to_lab(value) for key, value in (team_colors or {}).items()
         }
+        self.team_reference_features = {
+            key: self._hex_to_team_feature(value)
+            for key, value in (team_colors or {}).items()
+        }
+        self.team_color_samples: list[np.ndarray] = []
+        self.team_cluster_centers: np.ndarray | None = None
+        self.team_cluster_mapping: dict[int, str] = {}
+        self.team_calibration_fits = 0
+        self.team_calibration_last_fit = 0
+        self.team_calibration_mapping_margin = 0.0
         self.previous_gray = None
         self.previous_ball_center: tuple[float, float] | None = None
         self.previous_ball_timestamp_ms: int | None = None
         self.team_votes: dict[int, Counter[str]] = {}
         self.tracker = self._build_tracker()
+        self.official_tracker = self._build_tracker()
 
     def _build_tracker(self):
         if self.tracker_name == "botsort":
@@ -192,25 +203,28 @@ class YoloVisionProvider(VisionProvider):
         self.previous_ball_center = None
         self.previous_ball_timestamp_ms = None
         self.team_votes = {}
-        if hasattr(self.tracker, "reset"):
-            self.tracker.reset()
-        else:
-            self.tracker = self._build_tracker()
+        for attribute in ("tracker", "official_tracker"):
+            tracker = getattr(self, attribute)
+            if hasattr(tracker, "reset"):
+                tracker.reset()
+            else:
+                setattr(self, attribute, self._build_tracker())
 
     def analyze_frame(self, frame, timestamp_ms: int) -> FrameAnalysis:
         import cv2
         import supervision as sv
 
         height, width = frame.shape[:2]
+        inference_confidence = min(
+            self.tracker_low_confidence,
+            self.ball_confidence,
+        )
         prediction = self.model.predict(
             source=frame,
-            # The reference profile deliberately matches main.py. The advanced
-            # profile can still feed low-confidence boxes to the recovery pass.
-            conf=(
-                self.confidence
-                if self.profile == "main_py"
-                else self.tracker_low_confidence
-            ),
+            # Player tracking keeps its own threshold below. A lower inference
+            # threshold is necessary so tiny ball candidates are not discarded
+            # by YOLO before the temporal ball selector can inspect them.
+            conf=inference_confidence,
             imgsz=self.image_size,
             device=self.device,
             verbose=False,
@@ -233,35 +247,71 @@ class YoloVisionProvider(VisionProvider):
             ObjectRole.GOALKEEPER,
             ObjectRole.REFEREE,
         }
-        tracker_input_roles = (
-            trackable_roles | {ObjectRole.BALL}
-            if self.profile == "main_py"
-            else trackable_roles
-        )
         raw_person_indices = [
             index for index, role in enumerate(roles) if role in trackable_roles
         ]
-        tracker_input_indices = [
-            index for index, role in enumerate(roles) if role in tracker_input_roles
+        raw_athlete_indices = [
+            index
+            for index, role in enumerate(roles)
+            if role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
         ]
-        deduplicated_person_indices = self._deduplicate_indices(
+        raw_official_indices = [
+            index for index, role in enumerate(roles) if role == ObjectRole.REFEREE
+        ]
+        tracker_person_indices = [
+            index
+            for index in raw_person_indices
+            if confidences[index] >= self.tracker_low_confidence
+        ]
+        tracker_athlete_indices = [
+            index
+            for index in raw_athlete_indices
+            if confidences[index] >= self.tracker_low_confidence
+        ]
+        tracker_official_indices = [
+            index
+            for index in raw_official_indices
+            if confidences[index] >= self.tracker_low_confidence
+        ]
+        deduplicated_athlete_indices = self._deduplicate_indices(
             detections.xyxy,
             confidences,
-            raw_person_indices,
+            tracker_athlete_indices,
+        )
+        deduplicated_official_indices = self._deduplicate_indices(
+            detections.xyxy,
+            confidences,
+            tracker_official_indices,
         )
         # main.py did not remove overlapping detections before ByteTrack. Keeping
         # that exact behaviour lets the short reference test isolate the pipeline
         # regression instead of guessing at more thresholds.
-        trackable_indices = (
-            tracker_input_indices
+        trackable_athlete_indices = (
+            tracker_athlete_indices
             if self.profile == "main_py"
-            else deduplicated_person_indices
+            else deduplicated_athlete_indices
+        )
+        trackable_official_indices = (
+            tracker_official_indices
+            if self.profile == "main_py"
+            else deduplicated_official_indices
         )
         tracked_rows = self._update_tracker(
             prediction,
             detections,
-            trackable_indices,
+            trackable_athlete_indices,
             frame,
+        )
+        official_rows = self._update_tracker(
+            prediction,
+            detections,
+            trackable_official_indices,
+            frame,
+            tracker=self.official_tracker,
+        )
+        tracked_rows.extend(
+            (box, confidence, class_id, int(tracker_id) + 1_000_000)
+            for box, confidence, class_id, tracker_id in official_rows
         )
 
         objects: list[TrackedObject] = []
@@ -308,15 +358,11 @@ class YoloVisionProvider(VisionProvider):
                 ):
                     continue
                 ball_candidates.append((xyxy, confidence))
-            selected_ball = (
-                max(ball_candidates, key=lambda item: float(item[1]))
-                if self.profile == "main_py" and ball_candidates
-                else self._select_ball(
-                    ball_candidates,
-                    objects,
-                    frame.shape,
-                    timestamp_ms,
-                )
+            selected_ball = self._select_ball(
+                ball_candidates,
+                objects,
+                frame.shape,
+                timestamp_ms,
             )
             if selected_ball is not None:
                 xyxy, confidence = selected_ball
@@ -389,7 +435,10 @@ class YoloVisionProvider(VisionProvider):
                 "rejected_person_boxes": [],
                 "rejected_person_detections": 0,
                 "duplicate_person_detections": max(
-                    0, len(raw_person_indices) - len(deduplicated_person_indices)
+                    0,
+                    len(tracker_person_indices)
+                    - len(deduplicated_athlete_indices)
+                    - len(deduplicated_official_indices),
                 ),
                 "tracked_athletes": sum(
                     item.role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
@@ -406,6 +455,7 @@ class YoloVisionProvider(VisionProvider):
                 "image_size": self.image_size,
                 "detector_confidence": self.confidence,
                 "ball_confidence": self.ball_confidence,
+                "team_calibration": self.team_calibration_diagnostics(),
             },
         )
 
@@ -563,11 +613,12 @@ class YoloVisionProvider(VisionProvider):
         required_margin = max(1, int(round(total_votes * 0.12)))
         return winner if winner_votes - runner_up_votes >= required_margin else None
 
-    def _update_tracker(self, prediction, detections, indices, frame):
+    def _update_tracker(self, prediction, detections, indices, frame, *, tracker=None):
+        tracker = tracker or self.tracker
         if self.tracker_name == "botsort":
             boxes = prediction.boxes[indices] if indices else prediction.boxes[:0]
             boxes = boxes.cpu().numpy()
-            tracks = self.tracker.update(boxes, frame)
+            tracks = tracker.update(boxes, frame)
             return [
                 (
                     row[:4],
@@ -584,7 +635,7 @@ class YoloVisionProvider(VisionProvider):
         athlete_mask = np.zeros(len(detections), dtype=bool)
         athlete_mask[indices] = True
         athletes = detections[athlete_mask] if len(detections) else detections
-        tracked = self.tracker.update_with_detections(athletes)
+        tracked = tracker.update_with_detections(athletes)
         return [
             (box, confidence, class_id, tracker_id)
             for box, confidence, class_id, tracker_id in zip(
@@ -631,42 +682,137 @@ class YoloVisionProvider(VisionProvider):
         return field_score, scene_cut
 
     def _classify_team(self, frame, box: tuple[float, float, float, float]) -> str | None:
-        if len(self.team_colors) < 2:
+        """Classify a jersey against two automatically learned match clusters.
+
+        The match colors are used only once to name the learned clusters home and
+        away. Per-frame classification compares the torso with those learned
+        broadcast colors, which is much more robust to shadows and compression
+        than comparing every crop directly with an exported CSS color.
+        """
+
+        feature = self._extract_team_feature(frame, box)
+        if feature is None:
             return None
+        self._observe_team_feature(feature)
+        if self.team_cluster_centers is None or not self.team_cluster_mapping:
+            return None
+        distances = np.linalg.norm(self.team_cluster_centers - feature, axis=1)
+        ranked = np.argsort(distances)
+        if len(ranked) < 2 or float(distances[ranked[1]] - distances[ranked[0]]) < 3.0:
+            return None
+        return self.team_cluster_mapping.get(int(ranked[0]))
+
+    def _extract_team_feature(
+        self,
+        frame,
+        box: tuple[float, float, float, float],
+    ) -> np.ndarray | None:
         import cv2
 
         height, width = frame.shape[:2]
         x1, y1, x2, y2 = box
         box_height = max(1.0, y2 - y1)
         box_width = max(1.0, x2 - x1)
-        left = max(0, min(width - 1, int(x1 + box_width * 0.18)))
-        right = max(left + 1, min(width, int(x2 - box_width * 0.18)))
-        top = max(0, min(height - 1, int(y1 + box_height * 0.08)))
-        bottom = max(top + 1, min(height, int(y1 + box_height * 0.58)))
+        left = max(0, min(width - 1, int(x1 + box_width * 0.25)))
+        right = max(left + 1, min(width, int(x2 - box_width * 0.25)))
+        top = max(0, min(height - 1, int(y1 + box_height * 0.16)))
+        bottom = max(top + 1, min(height, int(y1 + box_height * 0.55)))
         crop = frame[top:bottom, left:right]
         if crop.size == 0:
             return None
-        lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).reshape(-1, 3)
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).reshape(-1, 3)
         green = (
             (hsv[:, 0] >= 25)
             & (hsv[:, 0] <= 100)
             & (hsv[:, 1] >= 20)
         )
-        usable = ~green & (hsv[:, 2] >= 18)
-        pixels = lab[usable]
+        usable = (~green) & (hsv[:, 2] >= 18)
+        pixels = hsv[usable]
         if len(pixels) < 8:
-            pixels = lab
-        team_scores = {
-            key: float(np.percentile(np.linalg.norm(pixels - color, axis=1), 30))
-            for key, color in self.team_colors.items()
-        }
-        ranked = sorted(team_scores.items(), key=lambda item: item[1])
-        best_team, best_score = ranked[0]
-        second_score = ranked[1][1]
-        if best_score > 95.0 or second_score - best_score < 7.0:
+            pixels = hsv[hsv[:, 2] >= 18]
+        if len(pixels) < 8:
             return None
-        return best_team
+
+        hues = pixels[:, 0].astype(np.float64)
+        saturations = pixels[:, 1].astype(np.float64)
+        values = pixels[:, 2].astype(np.float64)
+        angles = hues * (2.0 * math.pi / 180.0)
+        # Low-saturation white/gray pixels have an unstable hue, so they carry
+        # less angular weight than a saturated red/black jersey.
+        hue_weights = np.maximum(0.15, saturations / 255.0)
+        mean_sin = float(np.average(np.sin(angles), weights=hue_weights))
+        mean_cos = float(np.average(np.cos(angles), weights=hue_weights))
+        hue = (math.atan2(mean_sin, mean_cos) * 180.0 / (2.0 * math.pi)) % 180.0
+        return self._team_feature(
+            hue,
+            float(np.median(saturations)),
+            float(np.median(values)),
+        )
+
+    def _observe_team_feature(self, feature: np.ndarray) -> None:
+        self.team_color_samples.append(feature.astype(np.float32))
+        if len(self.team_color_samples) > 400:
+            self.team_color_samples.pop(0)
+        sample_count = len(self.team_color_samples)
+        if sample_count < 12:
+            return
+        if (
+            self.team_cluster_centers is not None
+            and sample_count - self.team_calibration_last_fit < 40
+        ):
+            return
+
+        import cv2
+
+        samples = np.asarray(self.team_color_samples, dtype=np.float32)
+        cv2.setRNGSeed(42)
+        _compactness, labels, centers = cv2.kmeans(
+            samples,
+            2,
+            None,
+            (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 40, 0.15),
+            10,
+            cv2.KMEANS_PP_CENTERS,
+        )
+        populations = np.bincount(labels.reshape(-1), minlength=2)
+        if int(populations.min()) < max(2, int(round(sample_count * 0.12))):
+            return
+        if float(np.linalg.norm(centers[0] - centers[1])) < 12.0:
+            return
+
+        mapping, margin = self._map_team_clusters(centers)
+        if len(mapping) != 2:
+            return
+        self.team_cluster_centers = centers.astype(np.float32)
+        self.team_cluster_mapping = mapping
+        self.team_calibration_mapping_margin = margin
+        self.team_calibration_last_fit = sample_count
+        self.team_calibration_fits += 1
+
+    def _map_team_clusters(self, centers: np.ndarray) -> tuple[dict[int, str], float]:
+        if not {"home", "away"}.issubset(self.team_reference_features):
+            return {}, 0.0
+        home = self.team_reference_features["home"]
+        away = self.team_reference_features["away"]
+        direct = float(np.linalg.norm(centers[0] - home)) + float(
+            np.linalg.norm(centers[1] - away)
+        )
+        swapped = float(np.linalg.norm(centers[0] - away)) + float(
+            np.linalg.norm(centers[1] - home)
+        )
+        if direct <= swapped:
+            return {0: "home", 1: "away"}, swapped - direct
+        return {0: "away", 1: "home"}, direct - swapped
+
+    def team_calibration_diagnostics(self) -> dict:
+        return {
+            "method": "automatic_jersey_clusters",
+            "status": "ready" if self.team_cluster_centers is not None else "collecting",
+            "samples": len(self.team_color_samples),
+            "fits": self.team_calibration_fits,
+            "mapping": dict(self.team_cluster_mapping),
+            "mapping_margin": round(self.team_calibration_mapping_margin, 2),
+        }
 
     @staticmethod
     def _role(name: str) -> ObjectRole:
@@ -681,3 +827,27 @@ class YoloVisionProvider(VisionProvider):
         red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
         pixel = np.uint8([[[blue, green, red]]])
         return cv2.cvtColor(pixel, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float64)
+
+    @staticmethod
+    def _team_feature(hue: float, saturation: float, value: float) -> np.ndarray:
+        angle = float(hue) * (2.0 * math.pi / 180.0)
+        hue_weight = 10.0 + 35.0 * max(0.0, min(1.0, float(saturation) / 255.0))
+        return np.asarray(
+            [
+                math.cos(angle) * hue_weight,
+                math.sin(angle) * hue_weight,
+                float(saturation) / 4.0,
+                float(value) / 8.0,
+            ],
+            dtype=np.float32,
+        )
+
+    @classmethod
+    def _hex_to_team_feature(cls, value: str) -> np.ndarray:
+        import cv2
+
+        value = value.lstrip("#")
+        red, green, blue = (int(value[index : index + 2], 16) for index in (0, 2, 4))
+        pixel = np.uint8([[[blue, green, red]]])
+        hue, saturation, brightness = cv2.cvtColor(pixel, cv2.COLOR_BGR2HSV)[0, 0]
+        return cls._team_feature(float(hue), float(saturation), float(brightness))

@@ -467,6 +467,78 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(result, "home")
 
+    def test_team_colors_are_learned_from_jerseys_then_mapped_to_clubs(self):
+        import cv2
+        import numpy as np
+
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.team_colors = {"home": object(), "away": object()}
+        provider.team_reference_features = {
+            "home": provider._hex_to_team_feature("#A54840"),
+            "away": provider._hex_to_team_feature("#F3F2F8"),
+        }
+        provider.team_color_samples = []
+        provider.team_cluster_centers = None
+        provider.team_cluster_mapping = {}
+        provider.team_calibration_fits = 0
+        provider.team_calibration_last_fit = 0
+        provider.team_calibration_mapping_margin = 0.0
+
+        frame = np.full((180, 320, 3), (50, 150, 50), dtype=np.uint8)
+        cv2.rectangle(frame, (40, 25), (90, 145), (35, 35, 180), -1)
+        cv2.rectangle(frame, (210, 25), (260, 145), (245, 245, 245), -1)
+        home_box = (40, 25, 90, 145)
+        away_box = (210, 25, 260, 145)
+        for _ in range(8):
+            provider._classify_team(frame, home_box)
+            provider._classify_team(frame, away_box)
+
+        self.assertEqual(provider._classify_team(frame, home_box), "home")
+        self.assertEqual(provider._classify_team(frame, away_box), "away")
+        self.assertEqual(provider.team_calibration_diagnostics()["status"], "ready")
+
+    def test_native_live_window_draws_without_changing_analysis(self):
+        import numpy as np
+
+        runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
+        runner.config = {"analysis_mode": "sample"}
+        runner._live_track_history = {}
+        analysis = FrameAnalysis(
+            timestamp_ms=18_000,
+            width=320,
+            height=180,
+            field_score=0.8,
+            objects=[
+                TrackedObject(
+                    "p1-w1-athlete-7",
+                    "player",
+                    (80, 40, 105, 120),
+                    0.9,
+                    team_key="home",
+                )
+            ],
+            diagnostics={
+                "raw_athlete_detections": 1,
+                "raw_ball_detections": 0,
+                "raw_detections": [],
+                "team_calibration": {"status": "ready", "samples": 20},
+            },
+        )
+        with patch("cv2.imshow"), patch("cv2.waitKey", return_value=0):
+            visible = runner._show_live_tracking(
+                np.zeros((180, 320, 3), dtype=np.uint8),
+                analysis,
+                elapsed_ms=18_000,
+                total_ms=120_000,
+                period_number=1,
+                window_index=1,
+                window_count=8,
+                team_labels={"home": "ST (T1)", "away": "CSS (T2)"},
+            )
+
+        self.assertTrue(visible)
+        self.assertEqual(len(analysis.objects), 1)
+
     def test_reference_uses_eight_five_second_windows_across_both_halves(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {
@@ -492,8 +564,8 @@ class VideoSamplingTests(unittest.TestCase):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {
             "analysis_mode": "sample",
-            "sample_window_seconds": 15,
-            "sample_windows_per_half": 4,
+            "sample_window_seconds": 60,
+            "sample_windows_per_half": 1,
         }
         periods = [
             SimpleNamespace(number=1, video_start_ms=0, video_end_ms=2_700_000),
@@ -502,7 +574,7 @@ class VideoSamplingTests(unittest.TestCase):
 
         windows = runner._tracking_windows(periods)
 
-        self.assertEqual(len(windows), 8)
+        self.assertEqual(len(windows), 2)
         self.assertEqual(
             sum(item["end_ms"] - item["start_ms"] for item in windows),
             120_000,

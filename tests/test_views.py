@@ -79,8 +79,8 @@ class DashboardTests(TestCase):
         self.assertRedirects(response, match.get_absolute_url())
         run = match.analysis_runs.get()
         self.assertEqual(run.config["analysis_mode"], "sample")
-        self.assertEqual(run.config["sample_window_seconds"], 15)
-        self.assertEqual(run.config["sample_windows_per_half"], 4)
+        self.assertEqual(run.config["sample_window_seconds"], 60)
+        self.assertEqual(run.config["sample_windows_per_half"], 1)
         self.assertFalse(run.config["render_clips"])
         self.assertEqual(run.config["yolo_profile"], "main_py")
         self.assertEqual(run.config["min_yolo_tracking_fps"], 12.5)
@@ -88,9 +88,10 @@ class DashboardTests(TestCase):
         self.assertEqual(run.config["yolo_track_low_confidence"], 0.30)
         self.assertEqual(run.config["yolo_new_track_confidence"], 0.25)
         self.assertEqual(run.config["yolo_track_match_threshold"], 0.80)
-        self.assertEqual(run.config["yolo_ball_confidence"], 0.30)
+        self.assertEqual(run.config["yolo_ball_confidence"], 0.12)
         self.assertEqual(run.config["yolo_image_size"], 640)
         self.assertEqual(run.config["yolo_player_class_ids"], [2])
+        self.assertEqual(run.config["yolo_goalkeeper_class_ids"], [1])
         self.assertEqual(run.config["yolo_ball_class_ids"], [0])
 
     def test_reference_run_uses_eight_five_second_windows(self):
