@@ -312,6 +312,71 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(legacy.frame_rate, 30)
         self.assertIs(current.args, args)
 
+    def test_overlapping_person_detections_keep_the_most_confident_box(self):
+        boxes = [
+            (100, 100, 150, 250),
+            (101, 101, 151, 251),
+            (300, 100, 350, 250),
+        ]
+
+        kept = YoloVisionProvider._deduplicate_indices(
+            boxes,
+            [0.72, 0.91, 0.80],
+            [0, 1, 2],
+        )
+
+        self.assertEqual(kept, [1, 2])
+
+    def test_overlapping_tracker_rows_are_not_drawn_twice(self):
+        first = TrackedObject(
+            "athlete-1", "player", (100, 100, 150, 250), 0.71
+        )
+        duplicate = TrackedObject(
+            "athlete-2", "player", (101, 101, 151, 251), 0.92
+        )
+        separate = TrackedObject(
+            "athlete-3", "goalkeeper", (300, 100, 350, 250), 0.84
+        )
+
+        kept = YoloVisionProvider._deduplicate_tracked_objects(
+            [first, duplicate, separate]
+        )
+
+        self.assertEqual([item.track_id for item in kept], ["athlete-2", "athlete-3"])
+
+    def test_ball_selection_rejects_isolated_false_positive(self):
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.previous_ball_center = None
+        provider.previous_ball_timestamp_ms = None
+        player = TrackedObject(
+            "athlete-1", "player", (100, 100, 150, 250), 0.90
+        )
+        near_player = ((125, 245, 135, 255), 0.42)
+        isolated = ((900, 500, 910, 510), 0.95)
+
+        selected = provider._select_ball(
+            [isolated, near_player],
+            [player],
+            (720, 1280, 3),
+            10_000,
+        )
+
+        self.assertEqual(selected, near_player)
+
+    def test_team_codes_use_club_initials(self):
+        self.assertEqual(
+            MatchAnalysisRunner._team_code(
+                SimpleNamespace(name="Stade Tunisien", short_name="STA")
+            ),
+            "ST",
+        )
+        self.assertEqual(
+            MatchAnalysisRunner._team_code(
+                SimpleNamespace(name="Club Sportif Sfaxien", short_name="CSS")
+            ),
+            "CSS",
+        )
+
     def test_sample_uses_two_thirty_second_windows_per_half(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {

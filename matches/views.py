@@ -10,6 +10,7 @@ from django.db.models import Count, Q
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
 from .forms import EventReviewForm, MatchUploadForm, PlayerForm, RosterUploadForm
@@ -40,7 +41,11 @@ def _passing_sample_run(match: Match) -> AnalysisRun | None:
             continue
         diagnostics = (run.metrics or {}).get("diagnostics") or {}
         terminal = run.status in {AnalysisRun.Status.REVIEW, AnalysisRun.Status.COMPLETED}
-        if terminal and diagnostics.get("verdict") == "pass":
+        approved = diagnostics.get("verdict") == "pass" or diagnostics.get(
+            "manual_approved", False
+        )
+        periods_current = not diagnostics.get("periods_changed_since_run", False)
+        if terminal and approved and periods_current:
             return run
     return None
 
@@ -269,6 +274,42 @@ def cancel_analysis(request: HttpRequest, pk) -> HttpResponse:
 
 
 @require_POST
+def validate_sample(request: HttpRequest, pk) -> HttpResponse:
+    run = get_object_or_404(AnalysisRun.objects.select_related("match"), pk=pk)
+    if _run_mode(run) != "sample" or run.status not in {
+        AnalysisRun.Status.REVIEW,
+        AnalysisRun.Status.COMPLETED,
+    }:
+        messages.error(request, "Seul un test rapide terminé peut être validé.")
+        return redirect(run.match)
+    if request.POST.get("confirm") != "yes":
+        messages.warning(
+            request,
+            "Confirme d’abord que les quatre aperçus ont été vérifiés.",
+        )
+        return redirect(run.match)
+
+    metrics = dict(run.metrics or {})
+    diagnostics = dict(metrics.get("diagnostics") or {})
+    if diagnostics.get("periods_changed_since_run"):
+        messages.warning(
+            request,
+            "Les limites des mi-temps ont changé. Relance le test rapide avant de le valider.",
+        )
+        return redirect(run.match)
+    diagnostics["manual_approved"] = True
+    diagnostics["manual_approved_at"] = timezone.now().isoformat()
+    metrics["diagnostics"] = diagnostics
+    run.metrics = metrics
+    run.save(update_fields=["metrics"])
+    messages.success(
+        request,
+        "Test validé manuellement. L’analyse complète est maintenant déverrouillée.",
+    )
+    return redirect(run.match)
+
+
+@require_POST
 @transaction.atomic
 def update_periods(request: HttpRequest, pk) -> HttpResponse:
     match = get_object_or_404(Match, pk=pk)
@@ -277,8 +318,12 @@ def update_periods(request: HttpRequest, pk) -> HttpResponse:
         p1_end = parse_timecode(request.POST.get("p1_end", ""))
         p2_start = parse_timecode(request.POST.get("p2_start", ""))
         p2_end = parse_timecode(request.POST.get("p2_end", ""))
+        p1_clock_start = parse_timecode(request.POST.get("p1_clock_start", "00:00"))
+        p2_clock_start = parse_timecode(request.POST.get("p2_clock_start", "45:00"))
         if not (p1_start < p1_end <= p2_start < p2_end):
             raise ValueError("Les périodes se chevauchent ou ne sont pas dans l’ordre.")
+        if p2_clock_start <= p1_clock_start:
+            raise ValueError("L’horloge de la deuxième mi-temps doit suivre la première.")
         duration = getattr(getattr(match, "video", None), "duration_ms", 0)
         if duration and p2_end > duration:
             raise ValueError("La fin de la deuxième période dépasse la durée de la vidéo.")
@@ -287,10 +332,18 @@ def update_periods(request: HttpRequest, pk) -> HttpResponse:
         return redirect(match)
 
     values = [
-        (1, "1re mi-temps", p1_start, p1_end, 0, 2_700_000),
-        (2, "2e mi-temps", p2_start, p2_end, 2_700_000, 5_400_000),
+        (1, "1re mi-temps", p1_start, p1_end, p1_clock_start),
+        (2, "2e mi-temps", p2_start, p2_end, p2_clock_start),
     ]
-    for number, label, start, end, clock_start, clock_end in values:
+    existing_video_bounds = {
+        period.number: (period.video_start_ms, period.video_end_ms)
+        for period in match.periods.filter(number__in=(1, 2))
+    }
+    video_bounds_changed = any(
+        existing_video_bounds.get(number) != (start, end)
+        for number, _label, start, end, _clock_start in values
+    )
+    for number, label, start, end, clock_start in values:
         MatchPeriod.objects.update_or_create(
             match=match,
             number=number,
@@ -299,12 +352,23 @@ def update_periods(request: HttpRequest, pk) -> HttpResponse:
                 "video_start_ms": start,
                 "video_end_ms": end,
                 "match_clock_start_ms": clock_start,
-                "match_clock_end_ms": clock_end,
+                "match_clock_end_ms": clock_start + (end - start),
                 "source": MatchPeriod.Source.MANUAL,
                 "confidence": 1.0,
                 "confirmed": True,
             },
         )
+    if video_bounds_changed:
+        for run in match.analysis_runs.all():
+            if _run_mode(run) != "sample" or not run.metrics:
+                continue
+            metrics = dict(run.metrics)
+            diagnostics = dict(metrics.get("diagnostics") or {})
+            diagnostics["periods_changed_since_run"] = True
+            diagnostics["manual_approved"] = False
+            metrics["diagnostics"] = diagnostics
+            run.metrics = metrics
+            run.save(update_fields=["metrics"])
     messages.success(request, "Les limites des deux mi-temps ont été confirmées.")
     return redirect(match)
 

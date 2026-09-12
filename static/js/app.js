@@ -26,6 +26,48 @@
     });
   });
 
+  const parseTimecode = (value) => {
+    const parts = String(value || '').trim().replace(',', '.').split(':');
+    if (!parts.length || parts.some((part) => part === '' || Number.isNaN(Number(part)))) return null;
+    let seconds = 0;
+    parts.forEach((part) => { seconds = seconds * 60 + Number(part); });
+    return seconds;
+  };
+
+  const formatTimecode = (seconds) => {
+    const totalMs = Math.max(0, Math.round(Number(seconds || 0) * 1000));
+    const millis = totalMs % 1000;
+    const totalSeconds = Math.floor(totalMs / 1000);
+    const secs = totalSeconds % 60;
+    const totalMinutes = Math.floor(totalSeconds / 60);
+    const minutes = totalMinutes % 60;
+    const hours = Math.floor(totalMinutes / 60);
+    const base = hours
+      ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+      : `${String(totalMinutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    return `${base}.${String(millis).padStart(3, '0')}`;
+  };
+
+  document.querySelectorAll('[data-preview-input]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!video) return;
+      const input = document.querySelector(`[name="${button.dataset.previewInput}"]`);
+      const seconds = parseTimecode(input?.value);
+      if (seconds === null) return;
+      video.currentTime = seconds;
+      video.play().catch(() => {});
+      video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
+
+  document.querySelectorAll('[data-set-period]').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!video) return;
+      const input = document.querySelector(`[name="${button.dataset.setPeriod}"]`);
+      if (input) input.value = formatTimecode(video.currentTime);
+    });
+  });
+
   const banner = document.querySelector('[data-analysis-status]');
   if (banner && banner.dataset.terminal !== 'true') {
     const poll = async () => {

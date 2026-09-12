@@ -412,6 +412,12 @@ class MatchAnalysisRunner:
                         diagnostic_counts["raw_other_detections"] += int(
                             analysis.diagnostics.get("raw_other_detections", 0)
                         )
+                        diagnostic_counts["rejected_person_detections"] += int(
+                            analysis.diagnostics.get("rejected_person_detections", 0)
+                        )
+                        diagnostic_counts["duplicate_person_detections"] += int(
+                            analysis.diagnostics.get("duplicate_person_detections", 0)
+                        )
                         model_classes.update(analysis.diagnostics.get("model_classes") or {})
                         tracker_name = str(
                             analysis.diagnostics.get("tracker") or tracker_name
@@ -428,6 +434,9 @@ class MatchAnalysisRunner:
                         raw_athlete_boxes = analysis.diagnostics.pop(
                             "raw_athlete_boxes", []
                         )
+                        rejected_person_boxes = analysis.diagnostics.pop(
+                            "rejected_person_boxes", []
+                        )
                         if (
                             self.analysis_mode == "sample"
                             and not preview_saved
@@ -441,6 +450,11 @@ class MatchAnalysisRunner:
                                 analysis,
                                 preview_path,
                                 raw_athlete_boxes=raw_athlete_boxes,
+                                rejected_person_boxes=rejected_person_boxes,
+                                team_labels={
+                                    "home": f"{self._team_code(self.match.home_team)} (T1)",
+                                    "away": f"{self._team_code(self.match.away_team)} (T2)",
+                                },
                             )
                             artifact = _save_local_artifact(
                                 self.run,
@@ -593,6 +607,8 @@ class MatchAnalysisRunner:
         output_path: Path,
         *,
         raw_athlete_boxes: list[list[float]] | None = None,
+        rejected_person_boxes: list[list[float]] | None = None,
+        team_labels: dict[str, str] | None = None,
     ) -> None:
         import cv2
 
@@ -602,20 +618,58 @@ class MatchAnalysisRunner:
             "away": (70, 130, 255),
             "unknown": (190, 190, 190),
             "ball": (255, 255, 255),
+            "goalkeeper": (255, 175, 50),
+            "referee": (255, 220, 70),
+            "rejected": (115, 115, 115),
         }
+        tracked_athlete_boxes = [
+            obj.bbox_xyxy
+            for obj in analysis.objects
+            if obj.role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
+        ]
         for raw_box in raw_athlete_boxes or []:
+            if any(
+                MatchAnalysisRunner._bbox_iou(raw_box, tracked_box) >= 0.45
+                for tracked_box in tracked_athlete_boxes
+            ):
+                continue
             x1, y1, x2, y2 = (int(value) for value in raw_box)
             cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 235, 255), 1)
+        for rejected_box in rejected_person_boxes or []:
+            x1, y1, x2, y2 = (int(value) for value in rejected_box)
+            cv2.rectangle(preview, (x1, y1), (x2, y2), colors["rejected"], 1)
+            cv2.putText(
+                preview,
+                "HORS TERRAIN / REJET",
+                (x1, max(18, y1 - 5)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.34,
+                colors["rejected"],
+                1,
+                cv2.LINE_AA,
+            )
         for obj in analysis.objects:
             x1, y1, x2, y2 = (int(value) for value in obj.bbox_xyxy)
             is_ball = obj.role == ObjectRole.BALL
-            color = (
-                colors["ball"]
-                if is_ball
-                else colors.get(obj.team_key or "unknown", colors["unknown"])
-            )
+            if is_ball:
+                color = colors["ball"]
+            elif obj.role == ObjectRole.GOALKEEPER:
+                color = colors["goalkeeper"]
+            elif obj.role == ObjectRole.REFEREE:
+                color = colors["referee"]
+            else:
+                color = colors.get(obj.team_key or "unknown", colors["unknown"])
             cv2.rectangle(preview, (x1, y1), (x2, y2), color, 3 if is_ball else 2)
-            label = "BALL" if is_ball else f"{obj.team_key or 'unknown'} {obj.track_id}"
+            track_number = obj.track_id.rsplit("-", 1)[-1]
+            if is_ball:
+                label = "BALLON"
+            elif obj.role == ObjectRole.GOALKEEPER:
+                label = f"GB #{track_number}"
+            elif obj.role == ObjectRole.REFEREE:
+                label = f"ARBITRE/JUGE #{track_number}"
+            else:
+                team_label = (team_labels or {}).get(obj.team_key or "", "EQUIPE ?")
+                label = f"J {team_label} #{track_number}"
             cv2.putText(
                 preview,
                 label,
@@ -626,13 +680,28 @@ class MatchAnalysisRunner:
                 1,
                 cv2.LINE_AA,
             )
-        cv2.rectangle(preview, (8, 8), (445, 38), (20, 20, 20), -1)
+        cv2.rectangle(preview, (8, 8), (760, 58), (20, 20, 20), -1)
         cv2.putText(
             preview,
-            "JAUNE=YOLO BRUT | COULEUR=PISTE | BLANC=BALLON",
-            (18, 29),
+            "JAUNE=YOLO NON SUIVI | GRIS=HORS TERRAIN/REJET",
+            (18, 27),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.48,
+            0.44,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
+        teams = team_labels or {"home": "T1", "away": "T2"}
+        role_legend = (
+            f"VERT=J {teams['home']} | ORANGE=J {teams['away']} | "
+            "BLEU=GB | CYAN=ARBITRE/JUGE | BLANC=BALLON"
+        )
+        cv2.putText(
+            preview,
+            role_legend,
+            (18, 48),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.40,
             (245, 245, 245),
             1,
             cv2.LINE_AA,
@@ -643,6 +712,25 @@ class MatchAnalysisRunner:
             preview = cv2.resize(preview, None, fx=scale, fy=scale)
         if not cv2.imwrite(str(output_path), preview):
             raise RuntimeError("Impossible d’écrire l’aperçu annoté du test rapide.")
+
+    @staticmethod
+    def _bbox_iou(first, second) -> float:
+        ax1, ay1, ax2, ay2 = [float(value) for value in first]
+        bx1, by1, bx2, by2 = [float(value) for value in second]
+        intersection = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(
+            0.0, min(ay2, by2) - max(ay1, by1)
+        )
+        first_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        second_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        union = first_area + second_area - intersection
+        return intersection / union if union > 0 else 0.0
+
+    @staticmethod
+    def _team_code(team) -> str:
+        words = [word for word in str(team.name).replace("-", " ").split() if word]
+        if len(words) >= 2:
+            return "".join(word[0] for word in words[:4]).upper()
+        return str(team.short_name or team.name)[:4].upper()
 
     def _tracking_windows(self, periods: list[MatchPeriod]) -> list[dict]:
         if self.analysis_mode != "sample":
@@ -755,6 +843,8 @@ class MatchAnalysisRunner:
             "raw_referee_detections": int(counts["raw_referee_detections"]),
             "raw_ball_detections": int(counts["raw_ball_detections"]),
             "raw_other_detections": int(counts["raw_other_detections"]),
+            "rejected_person_detections": int(counts["rejected_person_detections"]),
+            "duplicate_person_detections": int(counts["duplicate_person_detections"]),
             "tracking_fps": round(float(tracking_fps), 2),
             "requested_tracking_fps": round(float(requested_tracking_fps), 2),
             "model_classes": model_classes or {},

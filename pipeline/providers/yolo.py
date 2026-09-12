@@ -87,6 +87,8 @@ class YoloVisionProvider(VisionProvider):
             key: self._hex_to_lab(value) for key, value in (team_colors or {}).items()
         }
         self.previous_gray = None
+        self.previous_ball_center: tuple[float, float] | None = None
+        self.previous_ball_timestamp_ms: int | None = None
         self.tracker = self._build_tracker()
 
     def _build_tracker(self):
@@ -157,6 +159,8 @@ class YoloVisionProvider(VisionProvider):
 
     def reset(self) -> None:
         self.previous_gray = None
+        self.previous_ball_center = None
+        self.previous_ball_timestamp_ms = None
         if hasattr(self.tracker, "reset"):
             self.tracker.reset()
         else:
@@ -194,9 +198,25 @@ class YoloVisionProvider(VisionProvider):
             ObjectRole.GOALKEEPER,
             ObjectRole.REFEREE,
         }
-        trackable_indices = [
+        raw_trackable_indices = [
             index for index, role in enumerate(roles) if role in trackable_roles
         ]
+        deduplicated_indices = self._deduplicate_indices(
+            detections.xyxy,
+            confidences,
+            raw_trackable_indices,
+        )
+        trackable_indices: list[int] = []
+        rejected_person_boxes: list[list[float]] = []
+        for index in deduplicated_indices:
+            role = roles[index]
+            box = detections.xyxy[index]
+            valid_shape = self._valid_person_box(frame.shape, box)
+            on_field = role == ObjectRole.REFEREE or self._box_on_field(frame, box)
+            if valid_shape and on_field:
+                trackable_indices.append(index)
+            elif confidences[index] >= self.confidence:
+                rejected_person_boxes.append([float(value) for value in box])
         tracked_rows = self._update_tracker(
             prediction,
             detections,
@@ -226,6 +246,7 @@ class YoloVisionProvider(VisionProvider):
                     image_y=image_y,
                 )
             )
+        objects = self._deduplicate_tracked_objects(objects)
 
         if len(detections):
             ball_candidates = []
@@ -240,10 +261,14 @@ class YoloVisionProvider(VisionProvider):
                 ):
                     continue
                 ball_candidates.append((xyxy, confidence))
-            if ball_candidates:
-                xyxy, confidence = max(
-                    ball_candidates, key=lambda candidate: float(candidate[1])
-                )
+            selected_ball = self._select_ball(
+                ball_candidates,
+                objects,
+                frame.shape,
+                timestamp_ms,
+            )
+            if selected_ball is not None:
+                xyxy, confidence = selected_ball
                 x1, y1, x2, y2 = [float(value) for value in xyxy]
                 objects.append(
                     TrackedObject(
@@ -267,9 +292,9 @@ class YoloVisionProvider(VisionProvider):
             replay_probability=0.72 if scene_cut and field_score < 0.2 else 0.0,
             diagnostics={
                 "raw_athlete_detections": sum(
-                    role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
-                    and confidence >= self.confidence
-                    for role, confidence in zip(roles, confidences)
+                    roles[index] in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
+                    and confidences[index] >= self.confidence
+                    for index in trackable_indices
                 ),
                 "raw_referee_detections": sum(
                     role == ObjectRole.REFEREE and confidence >= self.confidence
@@ -284,13 +309,16 @@ class YoloVisionProvider(VisionProvider):
                     for role, confidence in zip(roles, confidences)
                 ),
                 "raw_athlete_boxes": [
-                    [float(value) for value in xyxy]
-                    for xyxy, role, confidence in zip(
-                        detections.xyxy, roles, confidences
-                    )
-                    if role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
-                    and confidence >= self.confidence
+                    [float(value) for value in detections.xyxy[index]]
+                    for index in trackable_indices
+                    if roles[index] in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
+                    and confidences[index] >= self.confidence
                 ],
+                "rejected_person_boxes": rejected_person_boxes,
+                "rejected_person_detections": len(rejected_person_boxes),
+                "duplicate_person_detections": max(
+                    0, len(raw_trackable_indices) - len(deduplicated_indices)
+                ),
                 "tracked_athletes": sum(
                     item.role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
                     for item in objects
@@ -304,6 +332,149 @@ class YoloVisionProvider(VisionProvider):
                 "tracker": self.tracker_name,
             },
         )
+
+    @staticmethod
+    def _box_iou(first, second) -> float:
+        ax1, ay1, ax2, ay2 = [float(value) for value in first]
+        bx1, by1, bx2, by2 = [float(value) for value in second]
+        intersection_width = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+        intersection_height = max(0.0, min(ay2, by2) - max(ay1, by1))
+        intersection = intersection_width * intersection_height
+        first_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        second_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        union = first_area + second_area - intersection
+        return intersection / union if union > 0 else 0.0
+
+    @classmethod
+    def _deduplicate_indices(
+        cls,
+        boxes,
+        confidences: list[float],
+        indices: list[int],
+        threshold: float = 0.82,
+    ) -> list[int]:
+        kept: list[int] = []
+        for index in sorted(indices, key=lambda item: confidences[item], reverse=True):
+            if any(cls._box_iou(boxes[index], boxes[other]) >= threshold for other in kept):
+                continue
+            kept.append(index)
+        return kept
+
+    @classmethod
+    def _deduplicate_tracked_objects(
+        cls,
+        objects: list[TrackedObject],
+        threshold: float = 0.80,
+    ) -> list[TrackedObject]:
+        kept: list[TrackedObject] = []
+        for item in sorted(objects, key=lambda obj: obj.confidence, reverse=True):
+            if any(
+                cls._box_iou(item.bbox_xyxy, other.bbox_xyxy) >= threshold
+                for other in kept
+            ):
+                continue
+            kept.append(item)
+        return kept
+
+    @staticmethod
+    def _valid_person_box(frame_shape, box) -> bool:
+        frame_height, frame_width = frame_shape[:2]
+        x1, y1, x2, y2 = [float(value) for value in box]
+        width = max(0.0, x2 - x1)
+        height = max(0.0, y2 - y1)
+        return (
+            height >= max(12.0, frame_height * 0.012)
+            and height >= width * 1.08
+            and width <= frame_width * 0.18
+            and height <= frame_height * 0.65
+        )
+
+    @staticmethod
+    def _box_on_field(frame, box) -> bool:
+        import cv2
+
+        frame_height, frame_width = frame.shape[:2]
+        x1, y1, x2, y2 = [float(value) for value in box]
+        width = max(1.0, x2 - x1)
+        height = max(1.0, y2 - y1)
+        center_x = int((x1 + x2) / 2.0)
+        foot_y = int(y2)
+        radius_x = max(7, int(width * 0.75))
+        radius_y = max(5, int(height * 0.12))
+        left = max(0, center_x - radius_x)
+        right = min(frame_width, center_x + radius_x + 1)
+        top = max(0, foot_y - radius_y)
+        bottom = min(frame_height, foot_y + radius_y + 1)
+        patch = frame[top:bottom, left:right]
+        if patch.size == 0:
+            return False
+        hsv = cv2.cvtColor(patch, cv2.COLOR_BGR2HSV)
+        green = (
+            (hsv[:, :, 0] >= 25)
+            & (hsv[:, :, 0] <= 100)
+            & (hsv[:, :, 1] >= 20)
+            & (hsv[:, :, 2] >= 18)
+        )
+        return float(np.count_nonzero(green) / green.size) >= 0.12
+
+    def _select_ball(self, candidates, athletes, frame_shape, timestamp_ms: int):
+        if not candidates:
+            return None
+        frame_height, frame_width = frame_shape[:2]
+        ranked = []
+        for box, confidence in candidates:
+            x1, y1, x2, y2 = [float(value) for value in box]
+            width = max(0.0, x2 - x1)
+            height = max(0.0, y2 - y1)
+            if (
+                width < 1.0
+                or height < 1.0
+                or width > frame_width * 0.045
+                or height > frame_height * 0.065
+            ):
+                continue
+            center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+            near_player = False
+            proximity_bonus = 0.0
+            for athlete in athletes:
+                px1, py1, px2, py2 = athlete.bbox_xyxy
+                player_height = max(1.0, py2 - py1)
+                player_point = ((px1 + px2) / 2.0, py2)
+                distance = math.hypot(
+                    center[0] - player_point[0], center[1] - player_point[1]
+                )
+                limit = max(45.0, player_height * 2.2)
+                if distance <= limit:
+                    near_player = True
+                    proximity_bonus = max(proximity_bonus, 0.45 * (1.0 - distance / limit))
+
+            temporal_match = False
+            temporal_bonus = 0.0
+            if (
+                self.previous_ball_center is not None
+                and self.previous_ball_timestamp_ms is not None
+            ):
+                elapsed_ms = max(1, timestamp_ms - self.previous_ball_timestamp_ms)
+                distance = math.hypot(
+                    center[0] - self.previous_ball_center[0],
+                    center[1] - self.previous_ball_center[1],
+                )
+                limit = min(260.0, max(55.0, elapsed_ms * 0.65))
+                if elapsed_ms <= 1_500 and distance <= limit:
+                    temporal_match = True
+                    temporal_bonus = 0.50 * (1.0 - distance / limit)
+
+            if near_player or temporal_match:
+                ranked.append(
+                    (float(confidence) + proximity_bonus + temporal_bonus, box, confidence, center)
+                )
+
+        if not ranked:
+            return None
+        _, box, confidence, center = max(ranked, key=lambda item: item[0])
+        self.previous_ball_center = center
+        self.previous_ball_timestamp_ms = timestamp_ms
+        return box, confidence
 
     def _update_tracker(self, prediction, detections, indices, frame):
         if self.tracker_name == "botsort":
@@ -377,16 +548,23 @@ class YoloVisionProvider(VisionProvider):
 
         height, width = frame.shape[:2]
         x1, y1, x2, y2 = box
-        left = max(0, min(width - 1, int(x1)))
-        right = max(left + 1, min(width, int(x2)))
-        top = max(0, min(height - 1, int(y1)))
-        bottom = max(top + 1, min(height, int(y1 + (y2 - y1) * 0.62)))
+        box_height = max(1.0, y2 - y1)
+        box_width = max(1.0, x2 - x1)
+        left = max(0, min(width - 1, int(x1 + box_width * 0.18)))
+        right = max(left + 1, min(width, int(x2 - box_width * 0.18)))
+        top = max(0, min(height - 1, int(y1 + box_height * 0.08)))
+        bottom = max(top + 1, min(height, int(y1 + box_height * 0.58)))
         crop = frame[top:bottom, left:right]
         if crop.size == 0:
             return None
         lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).reshape(-1, 3)
         hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).reshape(-1, 3)
-        usable = (hsv[:, 1] >= 35) & ~((hsv[:, 0] >= 25) & (hsv[:, 0] <= 100))
+        green = (
+            (hsv[:, 0] >= 25)
+            & (hsv[:, 0] <= 100)
+            & (hsv[:, 1] >= 20)
+        )
+        usable = ~green & (hsv[:, 2] >= 18)
         pixels = lab[usable]
         if len(pixels) < 8:
             pixels = lab

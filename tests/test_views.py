@@ -101,3 +101,88 @@ class DashboardTests(TestCase):
 
         self.assertRedirects(response, match.get_absolute_url())
         self.assertFalse(match.analysis_runs.exists())
+
+    def test_manual_sample_validation_unlocks_full_analysis(self):
+        home = Team.objects.create(name="Stade Tunisien", short_name="STA")
+        away = Team.objects.create(name="Club Sportif Sfaxien", short_name="CSS")
+        match = Match.objects.create(home_team=home, away_team=away)
+        for number, start in ((1, 0), (2, 3_300_000)):
+            MatchPeriod.objects.create(
+                match=match,
+                number=number,
+                label=f"MT{number}",
+                video_start_ms=start,
+                video_end_ms=start + 2_700_000,
+                match_clock_start_ms=(number - 1) * 2_700_000,
+                match_clock_end_ms=number * 2_700_000,
+                confirmed=True,
+            )
+        sample = AnalysisRun.objects.create(
+            match=match,
+            status=AnalysisRun.Status.REVIEW,
+            config={"analysis_mode": "sample"},
+            metrics={"diagnostics": {"verdict": "fail"}},
+        )
+
+        response = self.client.post(
+            reverse("analysis-validate-sample", kwargs={"pk": sample.pk}),
+            {"confirm": "yes"},
+        )
+
+        self.assertRedirects(response, match.get_absolute_url())
+        sample.refresh_from_db()
+        self.assertTrue(sample.metrics["diagnostics"]["manual_approved"])
+
+        self.client.post(
+            reverse("match-start-analysis", kwargs={"pk": match.pk}),
+            {"mode": "full"},
+        )
+        self.assertEqual(match.analysis_runs.count(), 2)
+        self.assertTrue(
+            match.analysis_runs.filter(config__analysis_mode="full").exists()
+        )
+
+    def test_editing_video_periods_invalidates_the_previous_sample(self):
+        home = Team.objects.create(name="Stade Tunisien", short_name="STA")
+        away = Team.objects.create(name="Club Sportif Sfaxien", short_name="CSS")
+        match = Match.objects.create(home_team=home, away_team=away)
+        for number, start in ((1, 0), (2, 3_300_000)):
+            MatchPeriod.objects.create(
+                match=match,
+                number=number,
+                label=f"MT{number}",
+                video_start_ms=start,
+                video_end_ms=start + 2_700_000,
+                match_clock_start_ms=(number - 1) * 2_700_000,
+                match_clock_end_ms=number * 2_700_000,
+                confirmed=True,
+            )
+        sample = AnalysisRun.objects.create(
+            match=match,
+            status=AnalysisRun.Status.REVIEW,
+            config={"analysis_mode": "sample"},
+            metrics={
+                "diagnostics": {"verdict": "fail", "manual_approved": True}
+            },
+        )
+
+        response = self.client.post(
+            reverse("match-update-periods", kwargs={"pk": match.pk}),
+            {
+                "p1_start": "00:00.000",
+                "p1_end": "45:04.000",
+                "p1_clock_start": "00:00.000",
+                "p2_start": "48:53.000",
+                "p2_end": "01:40:08.000",
+                "p2_clock_start": "45:00.000",
+            },
+        )
+
+        self.assertRedirects(response, match.get_absolute_url())
+        second_half = match.periods.get(number=2)
+        self.assertEqual(second_half.video_start_ms, 2_933_000)
+        self.assertEqual(second_half.match_clock_start_ms, 2_700_000)
+        self.assertEqual(second_half.match_clock_end_ms, 5_775_000)
+        sample.refresh_from_db()
+        self.assertTrue(sample.metrics["diagnostics"]["periods_changed_since_run"])
+        self.assertFalse(sample.metrics["diagnostics"]["manual_approved"])
