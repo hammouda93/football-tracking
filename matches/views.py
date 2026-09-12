@@ -2,15 +2,25 @@ from __future__ import annotations
 
 import csv
 import json
+import mimetypes
+import os
+import re
 
 from django.conf import settings
 from django.contrib import messages
 from django.db import transaction
 from django.db.models import Count, Q
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import (
+    FileResponse,
+    HttpRequest,
+    HttpResponse,
+    JsonResponse,
+    StreamingHttpResponse,
+)
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.http import content_disposition_header
 from django.views.decorators.http import require_GET, require_POST
 
 from .forms import EventReviewForm, MatchUploadForm, PlayerForm, RosterUploadForm
@@ -19,6 +29,7 @@ from .models import (
     Event,
     Match,
     MatchPeriod,
+    MatchVideo,
     Player,
     PlayerMatchStat,
     PossessionSegment,
@@ -175,6 +186,71 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
     return render(request, "matches/detail.html", context)
 
 
+def _range_file_iterator(
+    path: str,
+    start: int,
+    length: int,
+    chunk_size: int = 1024 * 1024,
+):
+    with open(path, "rb") as source:
+        source.seek(start)
+        remaining = length
+        while remaining > 0:
+            chunk = source.read(min(chunk_size, remaining))
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+@require_GET
+def stream_match_video(request: HttpRequest, pk) -> HttpResponse:
+    video = get_object_or_404(MatchVideo, match_id=pk)
+    path = video.file.path
+    file_size = os.path.getsize(path)
+    content_type = mimetypes.guess_type(video.original_name or path)[0] or "video/mp4"
+    range_header = request.headers.get("Range", "").strip()
+    range_match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header)
+
+    if range_header and range_match is None:
+        response = HttpResponse(status=416)
+        response["Content-Range"] = f"bytes */{file_size}"
+        return response
+
+    if range_match is not None:
+        start_text, end_text = range_match.groups()
+        if start_text:
+            start = int(start_text)
+            end = int(end_text) if end_text else file_size - 1
+        elif end_text:
+            suffix_length = min(int(end_text), file_size)
+            start = file_size - suffix_length
+            end = file_size - 1
+        else:
+            start, end = 0, file_size - 1
+        if start >= file_size or start > end:
+            response = HttpResponse(status=416)
+            response["Content-Range"] = f"bytes */{file_size}"
+            return response
+        end = min(end, file_size - 1)
+        length = end - start + 1
+        response = StreamingHttpResponse(
+            _range_file_iterator(path, start, length),
+            status=206,
+            content_type=content_type,
+        )
+        response["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        response["Content-Length"] = str(length)
+    else:
+        response = FileResponse(open(path, "rb"), content_type=content_type)
+        response["Content-Length"] = str(file_size)
+
+    response["Accept-Ranges"] = "bytes"
+    filename = os.path.basename(video.original_name or path)
+    response["Content-Disposition"] = content_disposition_header(False, filename)
+    return response
+
+
 @require_POST
 def start_analysis(request: HttpRequest, pk) -> HttpResponse:
     match = get_object_or_404(Match, pk=pk)
@@ -215,6 +291,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "min_yolo_tracking_fps": settings.ANALYSIS_MIN_YOLO_TRACKING_FPS,
             "yolo_model_path": settings.YOLO_MODEL_PATH,
             "yolo_confidence": settings.YOLO_CONFIDENCE,
+            "yolo_ball_confidence": settings.YOLO_BALL_CONFIDENCE,
             "yolo_image_size": settings.YOLO_IMAGE_SIZE,
             "yolo_tracker": settings.YOLO_TRACKER,
             "yolo_track_low_confidence": settings.YOLO_TRACK_LOW_CONFIDENCE,
@@ -225,8 +302,8 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_goalkeeper_class_ids": settings.YOLO_GOALKEEPER_CLASS_IDS,
             "yolo_referee_class_ids": settings.YOLO_REFEREE_CLASS_IDS,
             "yolo_ball_class_ids": settings.YOLO_BALL_CLASS_IDS,
-            "sample_window_seconds": 30,
-            "sample_windows_per_half": 2,
+            "sample_window_seconds": 15,
+            "sample_windows_per_half": 4,
             "render_clips": mode == "full",
         },
     )
@@ -285,7 +362,7 @@ def validate_sample(request: HttpRequest, pk) -> HttpResponse:
     if request.POST.get("confirm") != "yes":
         messages.warning(
             request,
-            "Confirme d’abord que les quatre aperçus ont été vérifiés.",
+            "Confirme d’abord que tous les aperçus ont été vérifiés.",
         )
         return redirect(run.match)
 

@@ -102,6 +102,7 @@ YOLO_MODEL_PATH = str(
     _yolo_model_path if _yolo_model_path.is_absolute() else BASE_DIR / _yolo_model_path
 )
 YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.30"))
+YOLO_BALL_CONFIDENCE = float(os.getenv("YOLO_BALL_CONFIDENCE", "0.12"))
 YOLO_IMAGE_SIZE = int(os.getenv("YOLO_IMAGE_SIZE", "1280"))
 YOLO_TRACKER = os.getenv("YOLO_TRACKER", "botsort")
 YOLO_TRACK_LOW_CONFIDENCE = float(os.getenv("YOLO_TRACK_LOW_CONFIDENCE", "0.10"))

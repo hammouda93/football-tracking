@@ -17,12 +17,23 @@
   }
 
   const video = document.querySelector('#match-video');
-  document.querySelectorAll('[data-video-ms]').forEach((button) => {
-    button.addEventListener('click', () => {
-      if (!video) return;
-      video.currentTime = Number(button.dataset.videoMs || 0) / 1000;
+  const seekVideo = (seconds) => {
+    if (!video) return;
+    const seek = () => {
+      video.currentTime = Math.max(0, Number(seconds || 0));
       video.play().catch(() => {});
       video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    };
+    if (video.readyState >= 1) {
+      seek();
+      return;
+    }
+    video.addEventListener('loadedmetadata', seek, { once: true });
+    video.load();
+  };
+  document.querySelectorAll('[data-video-ms]').forEach((button) => {
+    button.addEventListener('click', () => {
+      seekVideo(Number(button.dataset.videoMs || 0) / 1000);
     });
   });
 
@@ -50,13 +61,10 @@
 
   document.querySelectorAll('[data-preview-input]').forEach((button) => {
     button.addEventListener('click', () => {
-      if (!video) return;
       const input = document.querySelector(`[name="${button.dataset.previewInput}"]`);
       const seconds = parseTimecode(input?.value);
       if (seconds === null) return;
-      video.currentTime = seconds;
-      video.play().catch(() => {});
-      video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      seekVideo(seconds);
     });
   });
 

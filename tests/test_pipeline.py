@@ -317,12 +317,13 @@ class VideoSamplingTests(unittest.TestCase):
             (100, 100, 150, 250),
             (101, 101, 151, 251),
             (300, 100, 350, 250),
+            (110, 150, 130, 220),
         ]
 
         kept = YoloVisionProvider._deduplicate_indices(
             boxes,
-            [0.72, 0.91, 0.80],
-            [0, 1, 2],
+            [0.72, 0.91, 0.80, 0.85],
+            [0, 1, 2, 3],
         )
 
         self.assertEqual(kept, [1, 2])
@@ -377,12 +378,24 @@ class VideoSamplingTests(unittest.TestCase):
             "CSS",
         )
 
-    def test_sample_uses_two_thirty_second_windows_per_half(self):
+    def test_team_label_uses_the_track_majority_instead_of_one_frame(self):
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.team_colors = {"home": object(), "away": object()}
+        provider.team_votes = {}
+
+        for _ in range(8):
+            result = provider._stabilize_team(17, "home")
+        for _ in range(2):
+            result = provider._stabilize_team(17, "away")
+
+        self.assertEqual(result, "home")
+
+    def test_sample_uses_eight_fifteen_second_windows_across_both_halves(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {
             "analysis_mode": "sample",
-            "sample_window_seconds": 30,
-            "sample_windows_per_half": 2,
+            "sample_window_seconds": 15,
+            "sample_windows_per_half": 4,
         }
         periods = [
             SimpleNamespace(number=1, video_start_ms=0, video_end_ms=2_700_000),
@@ -391,9 +404,12 @@ class VideoSamplingTests(unittest.TestCase):
 
         windows = runner._tracking_windows(periods)
 
-        self.assertEqual(len(windows), 4)
+        self.assertEqual(len(windows), 8)
         self.assertEqual(sum(item["end_ms"] - item["start_ms"] for item in windows), 120_000)
-        self.assertEqual([item["period"].number for item in windows], [1, 1, 2, 2])
+        self.assertEqual(
+            [item["period"].number for item in windows],
+            [1, 1, 1, 1, 2, 2, 2, 2],
+        )
 
     def test_diagnostics_fail_bad_ball_team_and_track_detection(self):
         diagnostics = MatchAnalysisRunner._tracking_diagnostics(
