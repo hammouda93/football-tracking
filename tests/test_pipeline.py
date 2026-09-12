@@ -293,6 +293,25 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(tracks, [([10, 20, 30, 60], 0.91, 2, 17)])
         self.assertEqual(provider.tracker.received, (prediction.boxes, frame))
 
+    def test_botsort_constructor_supports_old_and_new_ultralytics(self):
+        class LegacyBOTSORT:
+            def __init__(self, args, frame_rate=30):
+                self.args = args
+                self.frame_rate = frame_rate
+
+        class CurrentBOTSORT:
+            def __init__(self, args):
+                self.args = args
+
+        args = object()
+
+        legacy = YoloVisionProvider._instantiate_botsort(LegacyBOTSORT, args)
+        current = YoloVisionProvider._instantiate_botsort(CurrentBOTSORT, args)
+
+        self.assertIs(legacy.args, args)
+        self.assertEqual(legacy.frame_rate, 30)
+        self.assertIs(current.args, args)
+
     def test_sample_uses_two_thirty_second_windows_per_half(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 from pathlib import Path
 from types import SimpleNamespace
@@ -100,13 +101,25 @@ class YoloVisionProvider(VisionProvider):
             raise RuntimeError(
                 "BoT-SORT indisponible. Mets à jour requirements-ml.txt."
             ) from exc
-        return BOTSORT(
-            self._botsort_args(),
-            # Ultralytics 8.3 scales ``track_buffer`` by frame_rate / 30 while
-            # newer releases store it directly in frames. Passing 30 keeps the
-            # configured frame count identical on both implementations.
-            frame_rate=30,
-        )
+        return self._instantiate_botsort(BOTSORT, self._botsort_args())
+
+    @staticmethod
+    def _instantiate_botsort(tracker_class, args):
+        """Build BoT-SORT across Ultralytics constructor versions.
+
+        Older 8.x releases accept ``frame_rate`` and scale ``track_buffer`` by
+        it. Newer 8.x releases removed that parameter and consume the buffer in
+        frames directly. A value of 30 preserves the configured frame count on
+        the older implementation.
+        """
+
+        try:
+            parameters = inspect.signature(tracker_class).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        if "frame_rate" in parameters:
+            return tracker_class(args, frame_rate=30)
+        return tracker_class(args)
 
     def _botsort_args(self) -> SimpleNamespace:
         return SimpleNamespace(
