@@ -120,6 +120,7 @@ Les valeurs se trouvent dans `.env` :
 | `ANALYSIS_DEVICE` | `cpu` | `cpu`, `0`, `cuda:0`, selon Ultralytics |
 | `YOLO_MODEL_PATH` | `models/football-players.pt` | Poids locaux |
 | `YOLO_CONFIDENCE` | `0.30` | Seuil de détection |
+| `YOLO_BALL_CONFIDENCE` | `0.12` | Seuil séparé pour le petit ballon |
 | `YOLO_IMAGE_SIZE` | `1280` | Résolution d’inférence |
 | `YOLO_TRACKER` | `botsort` | `botsort` pour caméra TV mobile, ou `bytetrack` comme baseline |
 | `YOLO_TRACK_LOW_CONFIDENCE` | `0.10` | Détections faibles réservées à la récupération d’une piste |

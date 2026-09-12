@@ -33,6 +33,7 @@ class Command(BaseCommand):
                 "device": settings.ANALYSIS_DEVICE,
                 "yolo_model_path": settings.YOLO_MODEL_PATH,
                 "yolo_confidence": settings.YOLO_CONFIDENCE,
+                "yolo_ball_confidence": settings.YOLO_BALL_CONFIDENCE,
                 "yolo_image_size": settings.YOLO_IMAGE_SIZE,
                 "yolo_tracker": settings.YOLO_TRACKER,
                 "yolo_track_low_confidence": settings.YOLO_TRACK_LOW_CONFIDENCE,

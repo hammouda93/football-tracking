@@ -1,7 +1,11 @@
+import tempfile
+
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from django.test.utils import override_settings
 from django.urls import reverse
 
-from matches.models import AnalysisRun, Match, MatchPeriod, Team
+from matches.models import AnalysisRun, Match, MatchPeriod, MatchVideo, Team
 
 
 class DashboardTests(TestCase):
@@ -47,7 +51,7 @@ class DashboardTests(TestCase):
         self.assertRedirects(response, match.get_absolute_url())
         self.assertFalse(match.analysis_runs.exists())
 
-    def test_sample_run_uses_four_short_windows_and_no_clips(self):
+    def test_sample_run_uses_eight_short_windows_and_no_clips(self):
         home = Team.objects.create(name="Home", short_name="HOM")
         away = Team.objects.create(name="Away", short_name="AWY")
         match = Match.objects.create(home_team=home, away_team=away)
@@ -71,12 +75,13 @@ class DashboardTests(TestCase):
         self.assertRedirects(response, match.get_absolute_url())
         run = match.analysis_runs.get()
         self.assertEqual(run.config["analysis_mode"], "sample")
-        self.assertEqual(run.config["sample_window_seconds"], 30)
-        self.assertEqual(run.config["sample_windows_per_half"], 2)
+        self.assertEqual(run.config["sample_window_seconds"], 15)
+        self.assertEqual(run.config["sample_windows_per_half"], 4)
         self.assertFalse(run.config["render_clips"])
         self.assertEqual(run.config["min_yolo_tracking_fps"], 8.0)
         self.assertEqual(run.config["yolo_tracker"], "botsort")
         self.assertEqual(run.config["yolo_track_low_confidence"], 0.10)
+        self.assertEqual(run.config["yolo_ball_confidence"], 0.12)
         self.assertEqual(run.config["yolo_player_class_ids"], [2])
         self.assertEqual(run.config["yolo_ball_class_ids"], [0])
 
@@ -186,3 +191,31 @@ class DashboardTests(TestCase):
         sample.refresh_from_db()
         self.assertTrue(sample.metrics["diagnostics"]["periods_changed_since_run"])
         self.assertFalse(sample.metrics["diagnostics"]["manual_approved"])
+
+    def test_video_stream_supports_byte_ranges_for_seeking(self):
+        home = Team.objects.create(name="Home", short_name="HOM")
+        away = Team.objects.create(name="Away", short_name="AWY")
+        match = Match.objects.create(home_team=home, away_team=away)
+
+        with tempfile.TemporaryDirectory() as media_root:
+            with override_settings(MEDIA_ROOT=media_root):
+                video = MatchVideo.objects.create(
+                    match=match,
+                    original_name="match.mp4",
+                    size_bytes=16,
+                )
+                video.file.save(
+                    "match.mp4",
+                    SimpleUploadedFile("match.mp4", b"0123456789abcdef"),
+                )
+
+                response = self.client.get(
+                    reverse("match-video-stream", kwargs={"pk": match.pk}),
+                    HTTP_RANGE="bytes=4-7",
+                )
+
+                self.assertEqual(response.status_code, 206)
+                self.assertEqual(response["Accept-Ranges"], "bytes")
+                self.assertEqual(response["Content-Range"], "bytes 4-7/16")
+                self.assertEqual(response["Content-Length"], "4")
+                self.assertEqual(b"".join(response.streaming_content), b"4567")

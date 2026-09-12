@@ -310,6 +310,7 @@ class MatchAnalysisRunner:
             model_path=self.config.get("yolo_model_path", ""),
             device=device,
             confidence=float(self.config.get("yolo_confidence", 0.30)),
+            ball_confidence=float(self.config.get("yolo_ball_confidence", 0.12)),
             image_size=int(self.config.get("yolo_image_size", 1280)),
             tracking_fps=tracking_fps,
             tracker_name=str(self.config.get("yolo_tracker", "botsort")),
@@ -431,9 +432,7 @@ class MatchAnalysisRunner:
                         diagnostic_counts[f"state_{str(sample.state)}"] += 1
                         for athlete in analysis.athletes:
                             team_observations[athlete.team_key or "unknown"] += 1
-                        raw_athlete_boxes = analysis.diagnostics.pop(
-                            "raw_athlete_boxes", []
-                        )
+                        analysis.diagnostics.pop("raw_athlete_boxes", None)
                         rejected_person_boxes = analysis.diagnostics.pop(
                             "rejected_person_boxes", []
                         )
@@ -449,7 +448,6 @@ class MatchAnalysisRunner:
                                 frame,
                                 analysis,
                                 preview_path,
-                                raw_athlete_boxes=raw_athlete_boxes,
                                 rejected_person_boxes=rejected_person_boxes,
                                 team_labels={
                                     "home": f"{self._team_code(self.match.home_team)} (T1)",
@@ -606,7 +604,6 @@ class MatchAnalysisRunner:
         analysis: FrameAnalysis,
         output_path: Path,
         *,
-        raw_athlete_boxes: list[list[float]] | None = None,
         rejected_person_boxes: list[list[float]] | None = None,
         team_labels: dict[str, str] | None = None,
     ) -> None:
@@ -622,19 +619,6 @@ class MatchAnalysisRunner:
             "referee": (255, 220, 70),
             "rejected": (115, 115, 115),
         }
-        tracked_athlete_boxes = [
-            obj.bbox_xyxy
-            for obj in analysis.objects
-            if obj.role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
-        ]
-        for raw_box in raw_athlete_boxes or []:
-            if any(
-                MatchAnalysisRunner._bbox_iou(raw_box, tracked_box) >= 0.45
-                for tracked_box in tracked_athlete_boxes
-            ):
-                continue
-            x1, y1, x2, y2 = (int(value) for value in raw_box)
-            cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 235, 255), 1)
         for rejected_box in rejected_person_boxes or []:
             x1, y1, x2, y2 = (int(value) for value in rejected_box)
             cv2.rectangle(preview, (x1, y1), (x2, y2), colors["rejected"], 1)
@@ -683,7 +667,7 @@ class MatchAnalysisRunner:
         cv2.rectangle(preview, (8, 8), (760, 58), (20, 20, 20), -1)
         cv2.putText(
             preview,
-            "JAUNE=YOLO NON SUIVI | GRIS=HORS TERRAIN/REJET",
+            "GRIS=HORS TERRAIN/REJET | SEULS LES OBJETS SUIVIS SONT AFFICHES",
             (18, 27),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.44,
@@ -746,16 +730,24 @@ class MatchAnalysisRunner:
 
         window_ms = max(
             10_000,
-            int(float(self.config.get("sample_window_seconds", 30)) * 1_000),
+            int(float(self.config.get("sample_window_seconds", 15)) * 1_000),
         )
         windows_per_half = max(
             1,
-            min(3, int(self.config.get("sample_windows_per_half", 2))),
+            min(4, int(self.config.get("sample_windows_per_half", 4))),
         )
         positions = (
             [0.50]
             if windows_per_half == 1
-            else ([0.25, 0.70] if windows_per_half == 2 else [0.18, 0.50, 0.78])
+            else (
+                [0.25, 0.70]
+                if windows_per_half == 2
+                else (
+                    [0.18, 0.50, 0.78]
+                    if windows_per_half == 3
+                    else [0.10, 0.36, 0.64, 0.90]
+                )
+            )
         )
         windows: list[dict] = []
         for period in periods:

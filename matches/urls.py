@@ -7,6 +7,7 @@ urlpatterns = [
     path("", views.dashboard, name="dashboard"),
     path("matches/upload/", views.upload_match, name="match-upload"),
     path("matches/<uuid:pk>/", views.match_detail, name="match-detail"),
+    path("matches/<uuid:pk>/video/", views.stream_match_video, name="match-video-stream"),
     path("matches/<uuid:pk>/analyse/", views.start_analysis, name="match-start-analysis"),
     path("matches/<uuid:pk>/periods/", views.update_periods, name="match-update-periods"),
     path("matches/<uuid:pk>/players/add/", views.add_player, name="match-add-player"),

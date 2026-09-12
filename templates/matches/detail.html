@@ -55,6 +55,7 @@
         {% if sample_diagnostics.tracking_fps %}<div><strong>{{ sample_diagnostics.tracking_fps|floatformat:1 }} FPS</strong><small>cadence {{ sample_diagnostics.tracker|default:"tracker"|upper }}</small></div>{% endif %}
         {% if sample_diagnostics.duplicate_person_detections %}<div><strong>{{ sample_diagnostics.duplicate_person_detections }}</strong><small>doublons YOLO retirés</small></div>{% endif %}
         {% if sample_diagnostics.rejected_person_detections %}<div><strong>{{ sample_diagnostics.rejected_person_detections }}</strong><small>personnes hors terrain/rejetées</small></div>{% endif %}
+        {% if sample_diagnostics.raw_ball_detections %}<div><strong>{{ sample_diagnostics.raw_ball_detections }}</strong><small>candidats ballon bruts</small></div>{% endif %}
       </div>
       {% if sample_previews %}<div class="sample-preview-grid">{% for preview in sample_previews %}<figure><a href="{{ preview.url }}" target="_blank"><img src="{{ preview.url }}" alt="Aperçu annoté MT{{ preview.period }} séquence {{ preview.window }}"></a><figcaption>MT{{ preview.period }} · {{ preview.video_time_ms|timecode }}</figcaption></figure>{% endfor %}</div>{% endif %}
       {% if sample_diagnostics.issues %}<ul class="diagnostic-issues">{% for issue in sample_diagnostics.issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% endif %}
@@ -64,7 +65,7 @@
         <p class="sample-validation-warning">Les limites des mi-temps ont changé depuis ce test. Relance le test rapide avant validation.</p>
       {% elif not sample_diagnostics.manual_approved and sample_diagnostics.verdict != 'pass' and latest_run.status == 'review' %}
         <form class="sample-manual-validation" method="post" action="{% url 'analysis-validate-sample' latest_run.pk %}">{% csrf_token %}
-          <label><input type="checkbox" name="confirm" value="yes" required> J’ai vérifié les quatre aperçus et j’accepte de continuer malgré les alertes.</label>
+          <label><input type="checkbox" name="confirm" value="yes" required> J’ai vérifié tous les aperçus et j’accepte de continuer malgré les alertes.</label>
           <button class="button button-secondary button-small" type="submit">Valider manuellement et déverrouiller</button>
         </form>
       {% endif %}
@@ -76,7 +77,7 @@
     <article class="panel video-panel">
       <div class="panel-heading"><div><p class="eyebrow">Source</p><h2>Vidéo du match</h2></div>{% if match.video %}<span>{{ match.video.width }}×{{ match.video.height }} · {{ match.video.fps|floatformat:1 }} fps</span>{% endif %}</div>
       {% if match.video %}
-        <div class="video-shell"><video id="match-video" controls preload="none" src="{{ match.video.file.url }}"></video><div class="video-watermark">FT / LOCAL</div></div>
+        <div class="video-shell"><video id="match-video" controls preload="metadata" src="{% url 'match-video-stream' match.pk %}"></video><div class="video-watermark">FT / LOCAL</div></div>
       {% else %}
         <div class="video-placeholder"><span>◫</span><p>Match de démonstration — aucune vidéo source.</p></div>
       {% endif %}

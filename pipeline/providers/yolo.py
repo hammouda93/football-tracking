@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import math
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,6 +34,7 @@ class YoloVisionProvider(VisionProvider):
         model_path: str,
         device: str = "cpu",
         confidence: float = 0.3,
+        ball_confidence: float = 0.12,
         image_size: int = 1280,
         tracking_fps: float = 10.0,
         tracker_name: str = "botsort",
@@ -71,6 +73,10 @@ class YoloVisionProvider(VisionProvider):
         self.tracker_low_confidence = max(
             0.01, min(float(tracker_low_confidence), float(confidence))
         )
+        self.ball_confidence = max(
+            self.tracker_low_confidence,
+            min(float(ball_confidence), float(confidence)),
+        )
         self.tracker_new_confidence = max(
             self.tracker_low_confidence, float(tracker_new_confidence)
         )
@@ -89,6 +95,7 @@ class YoloVisionProvider(VisionProvider):
         self.previous_gray = None
         self.previous_ball_center: tuple[float, float] | None = None
         self.previous_ball_timestamp_ms: int | None = None
+        self.team_votes: dict[int, Counter[str]] = {}
         self.tracker = self._build_tracker()
 
     def _build_tracker(self):
@@ -161,6 +168,7 @@ class YoloVisionProvider(VisionProvider):
         self.previous_gray = None
         self.previous_ball_center = None
         self.previous_ball_timestamp_ms = None
+        self.team_votes = {}
         if hasattr(self.tracker, "reset"):
             self.tracker.reset()
         else:
@@ -232,7 +240,8 @@ class YoloVisionProvider(VisionProvider):
             image_y = y2 / max(height, 1)
             team_key = None
             if role == ObjectRole.PLAYER:
-                team_key = self._classify_team(frame, (x1, y1, x2, y2))
+                observed_team = self._classify_team(frame, (x1, y1, x2, y2))
+                team_key = self._stabilize_team(int(tracker_id), observed_team)
             track_id = f"athlete-{int(tracker_id)}"
             objects.append(
                 TrackedObject(
@@ -257,7 +266,7 @@ class YoloVisionProvider(VisionProvider):
             ):
                 if (
                     self._role_for(int(class_id), names) != ObjectRole.BALL
-                    or float(confidence) < self.confidence
+                    or float(confidence) < self.ball_confidence
                 ):
                     continue
                 ball_candidates.append((xyxy, confidence))
@@ -301,7 +310,7 @@ class YoloVisionProvider(VisionProvider):
                     for role, confidence in zip(roles, confidences)
                 ),
                 "raw_ball_detections": sum(
-                    role == ObjectRole.BALL and confidence >= self.confidence
+                    role == ObjectRole.BALL and confidence >= self.ball_confidence
                     for role, confidence in zip(roles, confidences)
                 ),
                 "raw_other_detections": sum(
@@ -345,6 +354,32 @@ class YoloVisionProvider(VisionProvider):
         union = first_area + second_area - intersection
         return intersection / union if union > 0 else 0.0
 
+    @staticmethod
+    def _box_smaller_coverage(first, second) -> float:
+        ax1, ay1, ax2, ay2 = [float(value) for value in first]
+        bx1, by1, bx2, by2 = [float(value) for value in second]
+        intersection = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(
+            0.0, min(ay2, by2) - max(ay1, by1)
+        )
+        first_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        second_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        smaller_area = min(first_area, second_area)
+        return intersection / smaller_area if smaller_area > 0 else 0.0
+
+    @classmethod
+    def _boxes_are_duplicates(
+        cls,
+        first,
+        second,
+        *,
+        iou_threshold: float,
+        coverage_threshold: float = 0.92,
+    ) -> bool:
+        return (
+            cls._box_iou(first, second) >= iou_threshold
+            or cls._box_smaller_coverage(first, second) >= coverage_threshold
+        )
+
     @classmethod
     def _deduplicate_indices(
         cls,
@@ -355,7 +390,14 @@ class YoloVisionProvider(VisionProvider):
     ) -> list[int]:
         kept: list[int] = []
         for index in sorted(indices, key=lambda item: confidences[item], reverse=True):
-            if any(cls._box_iou(boxes[index], boxes[other]) >= threshold for other in kept):
+            if any(
+                cls._boxes_are_duplicates(
+                    boxes[index],
+                    boxes[other],
+                    iou_threshold=threshold,
+                )
+                for other in kept
+            ):
                 continue
             kept.append(index)
         return kept
@@ -369,7 +411,11 @@ class YoloVisionProvider(VisionProvider):
         kept: list[TrackedObject] = []
         for item in sorted(objects, key=lambda obj: obj.confidence, reverse=True):
             if any(
-                cls._box_iou(item.bbox_xyxy, other.bbox_xyxy) >= threshold
+                cls._boxes_are_duplicates(
+                    item.bbox_xyxy,
+                    other.bbox_xyxy,
+                    iou_threshold=threshold,
+                )
                 for other in kept
             ):
                 continue
@@ -429,8 +475,10 @@ class YoloVisionProvider(VisionProvider):
             if (
                 width < 1.0
                 or height < 1.0
-                or width > frame_width * 0.045
-                or height > frame_height * 0.065
+                or width > frame_width * 0.025
+                or height > frame_height * 0.040
+                or width / height < 0.45
+                or width / height > 2.20
             ):
                 continue
             center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
@@ -443,7 +491,7 @@ class YoloVisionProvider(VisionProvider):
                 distance = math.hypot(
                     center[0] - player_point[0], center[1] - player_point[1]
                 )
-                limit = max(45.0, player_height * 2.2)
+                limit = max(85.0, player_height * 3.5)
                 if distance <= limit:
                     near_player = True
                     proximity_bonus = max(proximity_bonus, 0.45 * (1.0 - distance / limit))
@@ -459,7 +507,7 @@ class YoloVisionProvider(VisionProvider):
                     center[0] - self.previous_ball_center[0],
                     center[1] - self.previous_ball_center[1],
                 )
-                limit = min(260.0, max(55.0, elapsed_ms * 0.65))
+                limit = min(360.0, max(85.0, elapsed_ms * 1.10))
                 if elapsed_ms <= 1_500 and distance <= limit:
                     temporal_match = True
                     temporal_bonus = 0.50 * (1.0 - distance / limit)
@@ -475,6 +523,19 @@ class YoloVisionProvider(VisionProvider):
         self.previous_ball_center = center
         self.previous_ball_timestamp_ms = timestamp_ms
         return box, confidence
+
+    def _stabilize_team(self, tracker_id: int, observed_team: str | None) -> str | None:
+        votes = self.team_votes.setdefault(int(tracker_id), Counter())
+        if observed_team in self.team_colors:
+            votes[observed_team] += 1
+        if not votes:
+            return None
+        ranked = votes.most_common(2)
+        winner, winner_votes = ranked[0]
+        runner_up_votes = ranked[1][1] if len(ranked) > 1 else 0
+        total_votes = sum(votes.values())
+        required_margin = max(1, int(round(total_votes * 0.12)))
+        return winner if winner_votes - runner_up_votes >= required_margin else None
 
     def _update_tracker(self, prediction, detections, indices, frame):
         if self.tracker_name == "botsort":
@@ -568,11 +629,16 @@ class YoloVisionProvider(VisionProvider):
         pixels = lab[usable]
         if len(pixels) < 8:
             pixels = lab
-        median = np.median(pixels, axis=0)
-        return min(
-            self.team_colors,
-            key=lambda key: float(np.linalg.norm(median - self.team_colors[key])),
-        )
+        team_scores = {
+            key: float(np.percentile(np.linalg.norm(pixels - color, axis=1), 30))
+            for key, color in self.team_colors.items()
+        }
+        ranked = sorted(team_scores.items(), key=lambda item: item[1])
+        best_team, best_score = ranked[0]
+        second_score = ranked[1][1]
+        if best_score > 95.0 or second_score - best_score < 7.0:
+            return None
+        return best_team
 
     @staticmethod
     def _role(name: str) -> ObjectRole:
