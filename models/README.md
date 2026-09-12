@@ -20,7 +20,15 @@ correspond au modèle utilisé par l'ancien prototype : `0=ballon`, `2=joueur`,
 ```
 
 Le test rapide affiche désormais ces classes et sépare le nombre de détections YOLO
-du nombre de joueurs effectivement conservés par ByteTrack.
+du nombre de joueurs effectivement conservés par le tracker.
+
+## Tracker recommandé pour une caméra TV
+
+`YOLO_TRACKER=botsort` est le mode par défaut. Contrairement à ByteTrack, BoT-SORT
+applique une compensation du mouvement global de la caméra avant d'associer les
+joueurs. Les boîtes comprises entre `YOLO_TRACK_LOW_CONFIDENCE` et
+`YOLO_CONFIDENCE` servent uniquement à récupérer une piste existante ; elles ne
+doivent pas créer de nouveaux identifiants.
 
 Un modèle générique COCO n’est pas suffisant pour un match complet : le ballon occupe parfois seulement quelques pixels et les gardiens/arbitres ont besoin de classes séparées. Entraînez ou adaptez le modèle sur vos angles, résolutions, stades et conditions lumineuses.
 

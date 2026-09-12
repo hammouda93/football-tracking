@@ -75,6 +75,8 @@ class DashboardTests(TestCase):
         self.assertEqual(run.config["sample_windows_per_half"], 2)
         self.assertFalse(run.config["render_clips"])
         self.assertEqual(run.config["min_yolo_tracking_fps"], 8.0)
+        self.assertEqual(run.config["yolo_tracker"], "botsort")
+        self.assertEqual(run.config["yolo_track_low_confidence"], 0.10)
         self.assertEqual(run.config["yolo_player_class_ids"], [2])
         self.assertEqual(run.config["yolo_ball_class_ids"], [0])
 

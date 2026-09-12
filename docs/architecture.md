@@ -34,7 +34,7 @@ t_{match}=t_{début\_match}+\left(t_{vidéo}-t_{début\_vidéo}\right)
 | Qualité | échantillons répartis | note A/B/C/reject | netteté, exposition, terrain, cuts |
 | Périodes | signaux temporels | deux plages vidéo | blocs terrain + fallback reviewable |
 | Perception | frames de chaque période | joueurs, ballon, arbitres | provider `heuristic` ou YOLO |
-| Tracking | détections | tracklets stables | ByteTrack |
+| Tracking | détections | tracklets stables | BoT-SORT avec compensation du mouvement caméra |
 | Caméra | frames | homographies plan/référence | ORB + RANSAC |
 | Terrain | points-clés | coordonnées 105 × 68 m | `PitchProjector` |
 | Jeu effectif | scène + ballon | état par frame | machine d’états avec temporisation |

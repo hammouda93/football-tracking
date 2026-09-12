@@ -312,6 +312,19 @@ class MatchAnalysisRunner:
             confidence=float(self.config.get("yolo_confidence", 0.30)),
             image_size=int(self.config.get("yolo_image_size", 1280)),
             tracking_fps=tracking_fps,
+            tracker_name=str(self.config.get("yolo_tracker", "botsort")),
+            tracker_low_confidence=float(
+                self.config.get("yolo_track_low_confidence", 0.10)
+            ),
+            tracker_new_confidence=float(
+                self.config.get("yolo_new_track_confidence", 0.35)
+            ),
+            tracker_match_threshold=float(
+                self.config.get("yolo_track_match_threshold", 0.85)
+            ),
+            tracker_buffer_seconds=float(
+                self.config.get("yolo_track_buffer_seconds", 5.0)
+            ),
             player_class_ids=self.config.get("yolo_player_class_ids", []),
             goalkeeper_class_ids=self.config.get("yolo_goalkeeper_class_ids", []),
             referee_class_ids=self.config.get("yolo_referee_class_ids", []),
@@ -339,6 +352,7 @@ class MatchAnalysisRunner:
         diagnostic_counts: Counter = Counter()
         team_observations: Counter = Counter()
         model_classes: dict[str, str] = {}
+        tracker_name = str(self.config.get("yolo_tracker", "botsort"))
         preview_artifacts: list[dict] = []
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
@@ -399,6 +413,9 @@ class MatchAnalysisRunner:
                             analysis.diagnostics.get("raw_other_detections", 0)
                         )
                         model_classes.update(analysis.diagnostics.get("model_classes") or {})
+                        tracker_name = str(
+                            analysis.diagnostics.get("tracker") or tracker_name
+                        )
                         diagnostic_counts["ball_visible_frames"] += int(analysis.ball is not None)
                         diagnostic_counts["field_frames"] += int(
                             analysis.field_score >= 0.14
@@ -408,6 +425,9 @@ class MatchAnalysisRunner:
                         diagnostic_counts[f"state_{str(sample.state)}"] += 1
                         for athlete in analysis.athletes:
                             team_observations[athlete.team_key or "unknown"] += 1
+                        raw_athlete_boxes = analysis.diagnostics.pop(
+                            "raw_athlete_boxes", []
+                        )
                         if (
                             self.analysis_mode == "sample"
                             and not preview_saved
@@ -416,7 +436,12 @@ class MatchAnalysisRunner:
                             preview_path = temp_path / (
                                 f"sample-p{period.number}-w{window['index']}.jpg"
                             )
-                            self._write_sample_preview(frame, analysis, preview_path)
+                            self._write_sample_preview(
+                                frame,
+                                analysis,
+                                preview_path,
+                                raw_athlete_boxes=raw_athlete_boxes,
+                            )
                             artifact = _save_local_artifact(
                                 self.run,
                                 AnalysisArtifact.Kind.ANNOTATED_VIDEO,
@@ -544,6 +569,7 @@ class MatchAnalysisRunner:
             tracking_fps=tracking_fps,
             requested_tracking_fps=requested_tracking_fps,
             model_classes=model_classes,
+            tracker_name=tracker_name,
         )
         return {
             "analysis_mode": self.analysis_mode,
@@ -561,7 +587,13 @@ class MatchAnalysisRunner:
         }
 
     @staticmethod
-    def _write_sample_preview(frame, analysis: FrameAnalysis, output_path: Path) -> None:
+    def _write_sample_preview(
+        frame,
+        analysis: FrameAnalysis,
+        output_path: Path,
+        *,
+        raw_athlete_boxes: list[list[float]] | None = None,
+    ) -> None:
         import cv2
 
         preview = frame.copy()
@@ -571,6 +603,9 @@ class MatchAnalysisRunner:
             "unknown": (190, 190, 190),
             "ball": (255, 255, 255),
         }
+        for raw_box in raw_athlete_boxes or []:
+            x1, y1, x2, y2 = (int(value) for value in raw_box)
+            cv2.rectangle(preview, (x1, y1), (x2, y2), (0, 235, 255), 1)
         for obj in analysis.objects:
             x1, y1, x2, y2 = (int(value) for value in obj.bbox_xyxy)
             is_ball = obj.role == ObjectRole.BALL
@@ -591,6 +626,17 @@ class MatchAnalysisRunner:
                 1,
                 cv2.LINE_AA,
             )
+        cv2.rectangle(preview, (8, 8), (445, 38), (20, 20, 20), -1)
+        cv2.putText(
+            preview,
+            "JAUNE=YOLO BRUT | COULEUR=PISTE | BLANC=BALLON",
+            (18, 29),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.48,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
         max_width = 1280
         if preview.shape[1] > max_width:
             scale = max_width / preview.shape[1]
@@ -660,6 +706,7 @@ class MatchAnalysisRunner:
         tracking_fps: float = 0.0,
         requested_tracking_fps: float = 0.0,
         model_classes: dict[str, str] | None = None,
+        tracker_name: str = "",
     ) -> dict:
         frames = max(int(counts["frames"]), 0)
         raw_athlete_observations = int(
@@ -711,6 +758,7 @@ class MatchAnalysisRunner:
             "tracking_fps": round(float(tracking_fps), 2),
             "requested_tracking_fps": round(float(requested_tracking_fps), 2),
             "model_classes": model_classes or {},
+            "tracker": tracker_name,
             "issues": [],
         }
         failures: list[str] = []
@@ -721,7 +769,7 @@ class MatchAnalysisRunner:
             failures.append("Moins de 6 joueurs sont détectés en moyenne par image.")
         elif diagnostics["average_tracked_athletes_per_frame"] < 6:
             failures.append(
-                "YOLO détecte les joueurs, mais ByteTrack n’en conserve pas 6 par image."
+                "YOLO détecte les joueurs, mais le tracker n’en conserve pas 6 par image."
             )
         if diagnostics["ball_visibility_pct"] < 10:
             failures.append("Le ballon est visible sur moins de 10 % des images.")
