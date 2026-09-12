@@ -298,6 +298,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "quality_max_samples": settings.ANALYSIS_QUALITY_MAX_SAMPLES,
             "tracking_fps": settings.ANALYSIS_TRACKING_FPS,
             "min_yolo_tracking_fps": settings.ANALYSIS_MIN_YOLO_TRACKING_FPS,
+            "live_window": settings.ANALYSIS_LIVE_WINDOW,
             "yolo_model_path": settings.YOLO_MODEL_PATH,
             "yolo_confidence": settings.YOLO_CONFIDENCE,
             "yolo_ball_confidence": settings.YOLO_BALL_CONFIDENCE,
@@ -311,8 +312,8 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_goalkeeper_class_ids": settings.YOLO_GOALKEEPER_CLASS_IDS,
             "yolo_referee_class_ids": settings.YOLO_REFEREE_CLASS_IDS,
             "yolo_ball_class_ids": settings.YOLO_BALL_CLASS_IDS,
-            "sample_window_seconds": 5 if mode == "reference" else 15,
-            "sample_windows_per_half": 4,
+            "sample_window_seconds": 5 if mode == "reference" else 60,
+            "sample_windows_per_half": 4 if mode == "reference" else 1,
             "render_clips": mode == "full",
         },
     )

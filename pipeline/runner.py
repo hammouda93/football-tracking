@@ -396,6 +396,13 @@ class MatchAnalysisRunner:
         )
         live_preview_path.parent.mkdir(parents=True, exist_ok=True)
         last_live_preview = 0.0
+        native_live_enabled = (
+            bool(self.config.get("live_window", False))
+            and self.analysis_mode in {"reference", "sample"}
+            and backend == "yolo"
+        )
+        native_live_requested = native_live_enabled
+        self._live_track_history: dict[str, list[tuple[int, int]]] = {}
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
             temp_path = Path(temp_dir)
@@ -414,6 +421,7 @@ class MatchAnalysisRunner:
                     period_prefix = f"p{period.number}-w{window['index']}-"
                     preview_saved = False
                     preview_target_ms = window_start_ms + (window_end_ms - window_start_ms) // 2
+                    self._live_track_history = {}
                     for timestamp_ms, frame in iter_frames(
                         metadata.path,
                         start_ms=window_start_ms,
@@ -435,6 +443,21 @@ class MatchAnalysisRunner:
                             period_prefix,
                             track_summaries,
                         )
+                        current_live_processed = processed_ms + timestamp_ms - window_start_ms
+                        if native_live_enabled:
+                            native_live_enabled = self._show_live_tracking(
+                                frame,
+                                analysis,
+                                elapsed_ms=current_live_processed,
+                                total_ms=tracking_duration,
+                                period_number=period.number,
+                                window_index=window["index"],
+                                window_count=len(windows),
+                                team_labels={
+                                    "home": f"{self._team_code(self.match.home_team)} (T1)",
+                                    "away": f"{self._team_code(self.match.away_team)} (T2)",
+                                },
+                            )
                         now = time.monotonic()
                         if now - last_live_preview >= 2.0:
                             self._write_live_preview(
@@ -452,10 +475,15 @@ class MatchAnalysisRunner:
                         all_samples.append((period, sample))
                         diagnostic_counts["frames"] += 1
                         diagnostic_counts["athlete_observations"] += len(analysis.athletes)
-                        diagnostic_counts["raw_athlete_detections"] += int(
+                        raw_athletes = int(
                             analysis.diagnostics.get(
                                 "raw_athlete_detections", len(analysis.athletes)
                             )
+                        )
+                        diagnostic_counts["raw_athlete_detections"] += raw_athletes
+                        diagnostic_counts["tracker_dropped_athletes"] += max(
+                            0,
+                            raw_athletes - len(analysis.athletes),
                         )
                         diagnostic_counts["raw_referee_detections"] += int(
                             analysis.diagnostics.get("raw_referee_detections", 0)
@@ -615,6 +643,14 @@ class MatchAnalysisRunner:
                 },
             )
 
+        if native_live_requested:
+            try:
+                import cv2
+
+                cv2.destroyAllWindows()
+            except Exception:
+                pass
+
         camera_summary["reliable_ratio"] = round(
             camera_summary["reliable_frames"] / max(camera_summary["frames"], 1), 4
         )
@@ -641,6 +677,11 @@ class MatchAnalysisRunner:
             detector_confidence=float(getattr(provider, "confidence", 0.0)),
             ball_confidence=float(getattr(provider, "ball_confidence", 0.0)),
             tracker_frame_rate=int(getattr(provider, "tracker_frame_rate", 0)),
+            team_calibration=(
+                provider.team_calibration_diagnostics()
+                if hasattr(provider, "team_calibration_diagnostics")
+                else {}
+            ),
         )
         return {
             "analysis_mode": self.analysis_mode,
@@ -656,6 +697,181 @@ class MatchAnalysisRunner:
             "diagnostics": diagnostics,
             "previews": preview_artifacts,
         }
+
+    def _show_live_tracking(
+        self,
+        frame,
+        analysis: FrameAnalysis,
+        *,
+        elapsed_ms: int,
+        total_ms: int,
+        period_number: int,
+        window_index: int,
+        window_count: int,
+        team_labels: dict[str, str],
+    ) -> bool:
+        """Show the same fluid native diagnostic style as the standalone main.py."""
+
+        import cv2
+
+        preview = frame.copy()
+        _frame_height, frame_width = preview.shape[:2]
+        raw_colors = {
+            "player": (255, 0, 255),
+            "goalkeeper": (255, 120, 0),
+            "referee": (255, 255, 0),
+            "ball": (0, 255, 255),
+        }
+        for detection in analysis.diagnostics.get("raw_detections", []):
+            box = detection.get("bbox") or []
+            if len(box) < 4:
+                continue
+            role = str(detection.get("role", "player"))
+            x1, y1, x2, y2 = (int(value) for value in box[:4])
+            color = raw_colors.get(role, (255, 0, 255))
+            cv2.rectangle(
+                preview,
+                (x1, y1),
+                (x2, y2),
+                color,
+                2 if role == "ball" else 1,
+            )
+
+        final_colors = {
+            "home": (70, 220, 120),
+            "away": (70, 130, 255),
+            "unknown": (200, 200, 200),
+            "ball": (255, 255, 255),
+            "goalkeeper": (255, 175, 50),
+            "referee": (255, 220, 70),
+        }
+        active_history: set[str] = set()
+        for obj in analysis.objects:
+            x1, y1, x2, y2 = (int(value) for value in obj.bbox_xyxy)
+            track_number = obj.track_id.rsplit("-", 1)[-1]
+            if obj.role == ObjectRole.BALL:
+                color = final_colors["ball"]
+                label = "BALLON"
+                thickness = 3
+            elif obj.role == ObjectRole.GOALKEEPER:
+                color = final_colors["goalkeeper"]
+                label = f"GB #{track_number}"
+                thickness = 2
+            elif obj.role == ObjectRole.REFEREE:
+                color = final_colors["referee"]
+                label = f"ARBITRE/JUGE #{track_number}"
+                thickness = 2
+            else:
+                color = final_colors.get(obj.team_key or "unknown", final_colors["unknown"])
+                team_label = team_labels.get(obj.team_key or "", "EQUIPE ?")
+                label = f"J {team_label} #{track_number}"
+                thickness = 2
+
+            cv2.rectangle(preview, (x1, y1), (x2, y2), color, thickness)
+            cv2.putText(
+                preview,
+                label,
+                (x1, max(18, y1 - 7)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.48,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
+            if obj.role in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}:
+                active_history.add(obj.track_id)
+                center = (int((x1 + x2) / 2), int((y1 + y2) / 2))
+                history = self._live_track_history.setdefault(obj.track_id, [])
+                history.append(center)
+                if len(history) > 5:
+                    del history[:-5]
+                if len(history) >= 2:
+                    deltas = [
+                        (
+                            history[index][0] - history[index - 1][0],
+                            history[index][1] - history[index - 1][1],
+                        )
+                        for index in range(1, len(history))
+                    ]
+                    velocity_x = sum(item[0] for item in deltas) / len(deltas)
+                    velocity_y = sum(item[1] for item in deltas) / len(deltas)
+                    speed = math.hypot(velocity_x, velocity_y)
+                    if speed >= 1.0:
+                        scale = min(6.0, 80.0 / max(speed, 1.0))
+                        arrow_tip = (
+                            int(center[0] + velocity_x * scale),
+                            int(center[1] + velocity_y * scale),
+                        )
+                        cv2.arrowedLine(
+                            preview,
+                            center,
+                            arrow_tip,
+                            (0, 0, 255),
+                            2,
+                            tipLength=0.30,
+                        )
+
+        self._live_track_history = {
+            key: value
+            for key, value in self._live_track_history.items()
+            if key in active_history
+        }
+        elapsed_s = max(0.0, min(float(total_ms), float(elapsed_ms))) / 1000.0
+        total_s = max(0.0, float(total_ms)) / 1000.0
+        raw_players = int(analysis.diagnostics.get("raw_athlete_detections", 0))
+        tracked_players = len(analysis.athletes)
+        raw_balls = int(analysis.diagnostics.get("raw_ball_detections", 0))
+        calibration = analysis.diagnostics.get("team_calibration") or {}
+        operation = "REFERENCE 40 S" if self.analysis_mode == "reference" else "TEST 2 MIN"
+        header_1 = (
+            f"{operation} {elapsed_s:05.1f}/{total_s:.0f}s"
+            f" | MT{period_number} SEQ={window_index}/{window_count}"
+            f" | VIDEO={self._duration_label(analysis.timestamp_ms / 1000)}"
+        )
+        header_2 = (
+            f"RAW JOUEURS={raw_players} | TRACKES={tracked_players}"
+            f" | PERDUS={max(0, raw_players - tracked_players)}"
+        )
+        header_3 = (
+            f"RAW BALL={raw_balls} | BALL={'OUI' if analysis.ball else 'NON'}"
+            f" | MAILLOTS={str(calibration.get('status', 'collecting')).upper()}"
+            f" ({int(calibration.get('samples', 0))}) | ESC=ARRETER"
+        )
+        cv2.rectangle(preview, (0, 0), (frame_width, 92), (15, 15, 15), -1)
+        for line, y, size in (
+            (header_1, 25, 0.58),
+            (header_2, 53, 0.56),
+            (header_3, 80, 0.53),
+        ):
+            cv2.putText(
+                preview,
+                line,
+                (14, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                size,
+                (255, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+
+        max_width = 1500
+        if preview.shape[1] > max_width:
+            scale = max_width / preview.shape[1]
+            preview = cv2.resize(preview, None, fx=scale, fy=scale)
+        try:
+            cv2.imshow("Football Tracking - LIVE", preview)
+            key = cv2.waitKey(1) & 0xFF
+        except cv2.error as exc:
+            logger.warning(
+                "Fenetre OpenCV indisponible; le live navigateur reste actif: %s",
+                exc,
+            )
+            return False
+        if key == 27:
+            cv2.destroyAllWindows()
+            raise AnalysisCancelled()
+        return True
 
     @staticmethod
     def _write_sample_preview(
@@ -968,6 +1184,7 @@ class MatchAnalysisRunner:
         detector_confidence: float = 0.0,
         ball_confidence: float = 0.0,
         tracker_frame_rate: int = 0,
+        team_calibration: dict | None = None,
     ) -> dict:
         frames = max(int(counts["frames"]), 0)
         raw_athlete_observations = int(
@@ -1003,6 +1220,13 @@ class MatchAnalysisRunner:
             "average_tracked_athletes_per_frame": round(
                 counts["athlete_observations"] / max(frames, 1), 2
             ),
+            "tracker_retention_pct": round(
+                100.0
+                * counts["athlete_observations"]
+                / max(raw_athlete_observations, 1),
+                2,
+            ),
+            "tracker_dropped_athletes": int(counts["tracker_dropped_athletes"]),
             "ball_visibility_pct": round(
                 100.0 * counts["ball_visible_frames"] / max(frames, 1), 2
             ),
@@ -1027,6 +1251,7 @@ class MatchAnalysisRunner:
             "detector_confidence": round(float(detector_confidence), 3),
             "ball_confidence": round(float(ball_confidence), 3),
             "tracker_frame_rate": int(tracker_frame_rate),
+            "team_calibration": team_calibration or {},
             "issues": [],
         }
         failures: list[str] = []
