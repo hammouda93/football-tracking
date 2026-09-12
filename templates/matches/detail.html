@@ -52,7 +52,7 @@
         <div><strong>{{ sample_diagnostics.tracks_per_minute|floatformat:1 }}</strong><small>pistes / minute</small></div>
         <div><strong>{{ sample_diagnostics.home_team_share_pct|floatformat:1 }}%</strong><small>{{ match.home_team.short_name }}</small></div>
         <div><strong>{{ sample_diagnostics.away_team_share_pct|floatformat:1 }}%</strong><small>{{ match.away_team.short_name }}</small></div>
-        {% if sample_diagnostics.tracking_fps %}<div><strong>{{ sample_diagnostics.tracking_fps|floatformat:1 }} FPS</strong><small>cadence ByteTrack</small></div>{% endif %}
+        {% if sample_diagnostics.tracking_fps %}<div><strong>{{ sample_diagnostics.tracking_fps|floatformat:1 }} FPS</strong><small>cadence {{ sample_diagnostics.tracker|default:"tracker"|upper }}</small></div>{% endif %}
       </div>
       {% if sample_previews %}<div class="sample-preview-grid">{% for preview in sample_previews %}<figure><a href="{{ preview.url }}" target="_blank"><img src="{{ preview.url }}" alt="Aperçu annoté MT{{ preview.period }} séquence {{ preview.window }}"></a><figcaption>MT{{ preview.period }} · {{ preview.video_time_ms|timecode }}</figcaption></figure>{% endfor %}</div>{% endif %}
       {% if sample_diagnostics.issues %}<ul class="diagnostic-issues">{% for issue in sample_diagnostics.issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% endif %}

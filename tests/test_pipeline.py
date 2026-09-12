@@ -156,6 +156,48 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertGreater(len(timestamps), 1)
         self.assertEqual(timestamps[:3], [0, 200, 400])
 
+    def test_sequential_reader_does_not_accumulate_native_frame_rounding(self):
+        class FakeCapture:
+            def __init__(self):
+                self.position = 0
+
+            def isOpened(self):
+                return True
+
+            def set(self, _property, _value):
+                return True
+
+            def get(self, property_id):
+                if property_id == 1:
+                    return 25.0
+                if property_id == 2:
+                    return 0.0
+                if property_id == 3:
+                    return float(self.position)
+                return 0.0
+
+            def read(self):
+                if self.position >= 26:
+                    return False, None
+                self.position += 1
+                return True, object()
+
+            def release(self):
+                return None
+
+        fake_cv2 = SimpleNamespace(
+            CAP_PROP_FPS=1,
+            CAP_PROP_POS_MSEC=2,
+            CAP_PROP_POS_FRAMES=3,
+            VideoCapture=lambda _path: FakeCapture(),
+        )
+
+        with patch.dict(sys.modules, {"cv2": fake_cv2}):
+            frames = list(iter_frames("match.mp4", target_fps=8.0))
+
+        timestamps = [timestamp for timestamp, _ in frames]
+        self.assertEqual(timestamps, [0, 160, 280, 400, 520, 640, 760, 880, 1_000])
+
     def test_tracking_label_contains_stage_video_frames_speed_and_eta(self):
         label = MatchAnalysisRunner._tracking_label(
             backend="yolo",
@@ -206,6 +248,50 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(provider._role_for(2, {2: "athlete"}), ObjectRole.PLAYER)
         self.assertEqual(provider._role_for(0, {0: "tiny-object"}), ObjectRole.BALL)
+
+    def test_botsort_profile_enables_camera_motion_compensation(self):
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.confidence = 0.30
+        provider.tracker_low_confidence = 0.10
+        provider.tracker_new_confidence = 0.35
+        provider.tracker_match_threshold = 0.85
+        provider.tracker_buffer_seconds = 5.0
+        provider.tracking_fps = 8.0
+
+        args = provider._botsort_args()
+
+        self.assertEqual(args.tracker_type, "botsort")
+        self.assertEqual(args.gmc_method, "sparseOptFlow")
+        self.assertEqual(args.track_low_thresh, 0.10)
+        self.assertEqual(args.new_track_thresh, 0.35)
+        self.assertEqual(args.track_buffer, 40)
+
+    def test_botsort_rows_are_converted_to_provider_tracks(self):
+        class FakeBoxes:
+            def __getitem__(self, _indices):
+                return self
+
+            def cpu(self):
+                return self
+
+            def numpy(self):
+                return self
+
+        class FakeTracker:
+            def update(self, boxes, frame):
+                self.received = (boxes, frame)
+                return [[10, 20, 30, 60, 17, 0.91, 2, 0]]
+
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.tracker_name = "botsort"
+        provider.tracker = FakeTracker()
+        prediction = SimpleNamespace(boxes=FakeBoxes())
+        frame = object()
+
+        tracks = provider._update_tracker(prediction, None, [0], frame)
+
+        self.assertEqual(tracks, [([10, 20, 30, 60], 0.91, 2, 17)])
+        self.assertEqual(provider.tracker.received, (prediction.boxes, frame))
 
     def test_sample_uses_two_thirty_second_windows_per_half(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
@@ -266,7 +352,7 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(diagnostics["average_player_detections_per_frame"], 11.0)
         self.assertEqual(diagnostics["average_tracked_athletes_per_frame"], 4.5)
-        self.assertIn("ByteTrack", " ".join(diagnostics["issues"]))
+        self.assertIn("tracker", " ".join(diagnostics["issues"]))
 
 
 class BallInPlayTests(unittest.TestCase):

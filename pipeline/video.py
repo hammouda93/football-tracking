@@ -130,7 +130,16 @@ def iter_frames(
             if end_ms is not None and timestamp_ms > end_ms:
                 break
             yield timestamp_ms, frame
-            next_timestamp = timestamp_ms + interval_ms
+            # Keep the target clock independent from the decoded-frame clock.
+            # Re-basing it on ``timestamp_ms`` would accumulate the rounding to
+            # native frames (8 requested FPS became about 6.25 FPS on a 25 FPS
+            # broadcast), which is especially damaging to multi-object tracking.
+            next_timestamp += interval_ms
+            if next_timestamp <= timestamp_ms:
+                missed_intervals = math.floor(
+                    (timestamp_ms - next_timestamp) / interval_ms
+                ) + 1
+                next_timestamp += missed_intervals * interval_ms
     finally:
         capture.release()
 

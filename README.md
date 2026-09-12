@@ -13,7 +13,7 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 - Traitement indépendant de chaque mi-temps pour réinitialiser les trackers et limiter les dérives.
 - Compensation pan/tilt/zoom par ORB, RANSAC et homographies par plan caméra.
 - Projection métrique 105 × 68 m lorsque quatre points terrain ou plus sont fournis.
-- Backend YOLO + ByteTrack pour joueurs, gardiens, arbitres et ballon.
+- Backend YOLO + BoT-SORT (compensation du mouvement caméra) pour joueurs, gardiens, arbitres et ballon ; ByteTrack reste disponible comme référence.
 - Classement des équipes par couleur de maillot avec vote sur toute la piste.
 - États `controlled`, `contested`, `loose`, `out`, `unknown` et segments de possession.
 - Candidats passe, conduite, perte, récupération, duel, dribble, tir et sortie.
@@ -116,11 +116,16 @@ Les valeurs se trouvent dans `.env` :
 | `ANALYSIS_SAMPLE_SECONDS` | `1.0` | Pas initial de diagnostic |
 | `ANALYSIS_QUALITY_MAX_SAMPLES` | `360` | Nombre maximal d’images lues directement pendant le contrôle qualité |
 | `ANALYSIS_TRACKING_FPS` | `10.0` | Images analysées par seconde |
-| `ANALYSIS_MIN_YOLO_TRACKING_FPS` | `8.0` | Plancher de cadence imposé à ByteTrack pour limiter la fragmentation |
+| `ANALYSIS_MIN_YOLO_TRACKING_FPS` | `8.0` | Plancher de cadence imposé au tracker pour limiter la fragmentation |
 | `ANALYSIS_DEVICE` | `cpu` | `cpu`, `0`, `cuda:0`, selon Ultralytics |
 | `YOLO_MODEL_PATH` | `models/football-players.pt` | Poids locaux |
 | `YOLO_CONFIDENCE` | `0.30` | Seuil de détection |
 | `YOLO_IMAGE_SIZE` | `1280` | Résolution d’inférence |
+| `YOLO_TRACKER` | `botsort` | `botsort` pour caméra TV mobile, ou `bytetrack` comme baseline |
+| `YOLO_TRACK_LOW_CONFIDENCE` | `0.10` | Détections faibles réservées à la récupération d’une piste |
+| `YOLO_NEW_TRACK_CONFIDENCE` | `0.35` | Confiance minimale pour créer un nouvel ID |
+| `YOLO_TRACK_MATCH_THRESHOLD` | `0.85` | Tolérance d’association du tracker |
+| `YOLO_TRACK_BUFFER_SECONDS` | `5.0` | Durée de conservation d’une piste brièvement perdue |
 | `YOLO_PLAYER_CLASS_IDS` | `2` | IDs numériques des classes joueur, séparés par des virgules |
 | `YOLO_GOALKEEPER_CLASS_IDS` | vide | IDs numériques des classes gardien |
 | `YOLO_REFEREE_CLASS_IDS` | `3` | IDs numériques des classes arbitre |
