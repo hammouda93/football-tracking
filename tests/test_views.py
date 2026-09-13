@@ -79,6 +79,7 @@ class DashboardTests(TestCase):
         self.assertRedirects(response, match.get_absolute_url())
         run = match.analysis_runs.get()
         self.assertEqual(run.config["analysis_mode"], "sample")
+        self.assertEqual(run.config["athlete_engine"], "legacy")
         self.assertEqual(run.config["sample_window_seconds"], 60)
         self.assertEqual(run.config["sample_windows_per_half"], 1)
         self.assertFalse(run.config["render_clips"])
@@ -93,7 +94,37 @@ class DashboardTests(TestCase):
         self.assertEqual(run.config["yolo_player_class_ids"], [2])
         self.assertEqual(run.config["yolo_goalkeeper_class_ids"], [1])
         self.assertEqual(run.config["yolo_ball_class_ids"], [0])
+        self.assertEqual(run.config["gsr_tracking_fps"], 5.0)
         self.assertEqual(run.config["home_team_cluster"], "B")
+
+    @override_settings(
+        ANALYSIS_ATHLETE_ENGINE="tracklab",
+        GSR_RUNNER_COMMAND=[],
+        GSR_PRECOMPUTED_RESULT="",
+    )
+    def test_external_engine_is_blocked_before_queue_when_bridge_is_missing(self):
+        home = Team.objects.create(name="Home", short_name="HOM")
+        away = Team.objects.create(name="Away", short_name="AWY")
+        match = Match.objects.create(home_team=home, away_team=away)
+        for number, start in ((1, 0), (2, 3_300_000)):
+            MatchPeriod.objects.create(
+                match=match,
+                number=number,
+                label=f"MT{number}",
+                video_start_ms=start,
+                video_end_ms=start + 2_700_000,
+                confirmed=True,
+            )
+
+        response = self.client.post(
+            reverse("match-start-analysis", kwargs={"pk": match.pk}),
+            {"mode": "reference"},
+            follow=True,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "GSR_RUNNER_COMMAND_JSON")
+        self.assertFalse(match.analysis_runs.exists())
 
     def test_reference_run_uses_eight_five_second_windows(self):
         home = Team.objects.create(name="Home", short_name="HOM")

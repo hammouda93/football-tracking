@@ -1,19 +1,16 @@
-from pathlib import Path
+import json
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
-
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 
 def _csv_ints(name: str, default: str = "") -> list[int]:
-    return [
-        int(value.strip())
-        for value in os.getenv(name, default).split(",")
-        if value.strip()
-    ]
+    return [int(value.strip()) for value in os.getenv(name, default).split(",") if value.strip()]
+
 
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "football-tracking-local-development-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
@@ -88,17 +85,21 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 2_621_440
 DATA_UPLOAD_MAX_MEMORY_SIZE = 20_971_520
 
 ANALYSIS_BACKEND = os.getenv("ANALYSIS_BACKEND", "heuristic")
+ANALYSIS_ATHLETE_ENGINE = os.getenv("ANALYSIS_ATHLETE_ENGINE", "legacy").strip().lower()
+if ANALYSIS_ATHLETE_ENGINE not in {"legacy", "tracklab", "winner2025"}:
+    raise ValueError("ANALYSIS_ATHLETE_ENGINE doit valoir legacy, tracklab ou winner2025.")
 ANALYSIS_SAMPLE_SECONDS = float(os.getenv("ANALYSIS_SAMPLE_SECONDS", "1.0"))
 ANALYSIS_QUALITY_MAX_SAMPLES = int(os.getenv("ANALYSIS_QUALITY_MAX_SAMPLES", "360"))
 ANALYSIS_TRACKING_FPS = float(os.getenv("ANALYSIS_TRACKING_FPS", "10.0"))
-ANALYSIS_MIN_YOLO_TRACKING_FPS = float(
-    os.getenv("ANALYSIS_MIN_YOLO_TRACKING_FPS", "8.0")
-)
+ANALYSIS_MIN_YOLO_TRACKING_FPS = float(os.getenv("ANALYSIS_MIN_YOLO_TRACKING_FPS", "8.0"))
 ANALYSIS_DEVICE = os.getenv("ANALYSIS_DEVICE", "cpu")
-ANALYSIS_LIVE_WINDOW = os.getenv(
-    "ANALYSIS_LIVE_WINDOW",
-    "1" if os.name == "nt" and DEBUG else "0",
-) == "1"
+ANALYSIS_LIVE_WINDOW = (
+    os.getenv(
+        "ANALYSIS_LIVE_WINDOW",
+        "1" if os.name == "nt" and DEBUG else "0",
+    )
+    == "1"
+)
 YOLO_PROFILE = os.getenv("YOLO_PROFILE", "main_py").strip().lower()
 if YOLO_PROFILE not in {"main_py", "advanced"}:
     raise ValueError("YOLO_PROFILE doit valoir main_py ou advanced.")
@@ -120,6 +121,25 @@ YOLO_PLAYER_CLASS_IDS = _csv_ints("YOLO_PLAYER_CLASS_IDS", "2")
 YOLO_GOALKEEPER_CLASS_IDS = _csv_ints("YOLO_GOALKEEPER_CLASS_IDS", "1")
 YOLO_REFEREE_CLASS_IDS = _csv_ints("YOLO_REFEREE_CLASS_IDS", "3")
 YOLO_BALL_CLASS_IDS = _csv_ints("YOLO_BALL_CLASS_IDS", "0")
+
+# TrackLab/sn-gamestate and SoccernetGSR Winner run in an isolated Python/CUDA
+# environment. A JSON argv avoids shell parsing and keeps paths with spaces safe.
+try:
+    _gsr_command_json = os.getenv("GSR_RUNNER_COMMAND_JSON", "[]").strip() or "[]"
+    GSR_RUNNER_COMMAND = json.loads(_gsr_command_json)
+except json.JSONDecodeError as exc:
+    raise ValueError("GSR_RUNNER_COMMAND_JSON doit être une liste JSON valide.") from exc
+if not isinstance(GSR_RUNNER_COMMAND, list) or not all(
+    isinstance(item, str) for item in GSR_RUNNER_COMMAND
+):
+    raise ValueError("GSR_RUNNER_COMMAND_JSON doit être une liste de chaînes.")
+GSR_PRECOMPUTED_RESULT = os.getenv("GSR_PRECOMPUTED_RESULT", "")
+GSR_TIMEOUT_SECONDS = int(os.getenv("GSR_TIMEOUT_SECONDS", "43200"))
+GSR_FRAME_TOLERANCE_MS = int(os.getenv("GSR_FRAME_TOLERANCE_MS", "120"))
+GSR_TRACKING_FPS = float(os.getenv("GSR_TRACKING_FPS", "5.0"))
+GSR_BALL_BACKEND = os.getenv("GSR_BALL_BACKEND", "yolo").strip().lower()
+if GSR_BALL_BACKEND not in {"none", "heuristic", "yolo"}:
+    raise ValueError("GSR_BALL_BACKEND doit valoir none, heuristic ou yolo.")
 
 # ``main_py`` is a reproducible control profile. It mirrors the standalone
 # script already validated on the source video, so old environment experiments

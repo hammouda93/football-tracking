@@ -47,6 +47,7 @@ class YoloVisionProvider(VisionProvider):
         goalkeeper_class_ids: list[int] | tuple[int, ...] | None = None,
         referee_class_ids: list[int] | tuple[int, ...] | None = None,
         ball_class_ids: list[int] | tuple[int, ...] | None = None,
+        inference_class_ids: list[int] | tuple[int, ...] | None = None,
         team_colors: dict[str, str] | None = None,
         home_team_cluster: str = "B",
         **_: object,
@@ -113,6 +114,11 @@ class YoloVisionProvider(VisionProvider):
         self._register_class_ids(goalkeeper_class_ids, ObjectRole.GOALKEEPER)
         self._register_class_ids(referee_class_ids, ObjectRole.REFEREE)
         self._register_class_ids(ball_class_ids, ObjectRole.BALL)
+        self.inference_class_ids = (
+            sorted({int(value) for value in inference_class_ids})
+            if inference_class_ids is not None
+            else None
+        )
         # ``team_colors`` is intentionally ignored. Club colors entered during
         # upload are presentation data, not vision inputs. Like the standalone
         # main.py prototype, the two jersey groups are learned from video crops.
@@ -228,6 +234,7 @@ class YoloVisionProvider(VisionProvider):
             conf=inference_confidence,
             imgsz=self.image_size,
             device=self.device,
+            classes=self.inference_class_ids,
             verbose=False,
         )[0]
         names = prediction.names

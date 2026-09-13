@@ -46,6 +46,25 @@ def _run_mode(run: AnalysisRun | None) -> str:
     return mode if mode in {"prepare", "reference", "sample", "full"} else "full"
 
 
+def _athlete_engine_label(run: AnalysisRun | None = None) -> str:
+    engine = str(
+        ((run.config or {}).get("athlete_engine") if run else None)
+        or settings.ANALYSIS_ATHLETE_ENGINE
+        or "legacy"
+    ).strip().lower()
+    return {
+        "legacy": "Moteur local YOLO / ByteTrack",
+        "tracklab": "TrackLab + sn-gamestate",
+        "winner2025": "SoccernetGSR Winner 2025",
+    }.get(engine, engine)
+
+
+def _athlete_engine_ready() -> bool:
+    return settings.ANALYSIS_ATHLETE_ENGINE == "legacy" or bool(
+        settings.GSR_RUNNER_COMMAND or settings.GSR_PRECOMPUTED_RESULT
+    )
+
+
 def _passing_sample_run(match: Match) -> AnalysisRun | None:
     for run in match.analysis_runs.all()[:25]:
         if _run_mode(run) != "sample":
@@ -152,9 +171,9 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
         "latest_mode": latest_mode,
         "latest_stage_label": (
             (
-                "Référence main.py en direct"
+                f"Test court · {_athlete_engine_label(latest_run)}"
                 if latest_mode == "reference"
-                else "Test joueurs, ballon et jeu effectif"
+                else f"Validation 2 min · {_athlete_engine_label(latest_run)}"
             )
             if latest_run
             and latest_mode in {"reference", "sample"}
@@ -176,6 +195,8 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
             if latest_mode in {"reference", "sample"}
             else []
         ),
+        "analysis_engine_label": _athlete_engine_label(latest_run),
+        "analysis_engine_ready": _athlete_engine_ready(),
         "periods_confirmed": len(periods) == 2 and all(period.confirmed for period in periods),
         "sample_ready": _passing_sample_run(match) is not None,
         "home_team_cluster": match.home_team_cluster,
@@ -294,12 +315,21 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "L’analyse complète est bloquée tant que le test rapide n’est pas validé.",
         )
         return redirect(match)
+    if mode != "prepare" and not _athlete_engine_ready():
+        messages.error(
+            request,
+            f"{_athlete_engine_label()} est sélectionné, mais la passerelle GSR "
+            "n’est pas configurée. Renseigne GSR_RUNNER_COMMAND_JSON ou "
+            "GSR_PRECOMPUTED_RESULT avant de lancer le test.",
+        )
+        return redirect(match)
 
     run = AnalysisRun.objects.create(
         match=match,
         config={
             "analysis_mode": mode,
             "backend": settings.ANALYSIS_BACKEND,
+            "athlete_engine": settings.ANALYSIS_ATHLETE_ENGINE,
             "device": settings.ANALYSIS_DEVICE,
             "yolo_profile": settings.YOLO_PROFILE,
             "sample_seconds": settings.ANALYSIS_SAMPLE_SECONDS,
@@ -320,6 +350,12 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_goalkeeper_class_ids": settings.YOLO_GOALKEEPER_CLASS_IDS,
             "yolo_referee_class_ids": settings.YOLO_REFEREE_CLASS_IDS,
             "yolo_ball_class_ids": settings.YOLO_BALL_CLASS_IDS,
+            "gsr_runner_command": settings.GSR_RUNNER_COMMAND,
+            "gsr_precomputed_result": settings.GSR_PRECOMPUTED_RESULT,
+            "gsr_timeout_seconds": settings.GSR_TIMEOUT_SECONDS,
+            "gsr_frame_tolerance_ms": settings.GSR_FRAME_TOLERANCE_MS,
+            "gsr_tracking_fps": settings.GSR_TRACKING_FPS,
+            "gsr_ball_backend": settings.GSR_BALL_BACKEND,
             "home_team_cluster": match.home_team_cluster,
             "sample_window_seconds": 5 if mode == "reference" else 60,
             "sample_windows_per_half": 4 if mode == "reference" else 1,
@@ -330,7 +366,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
     match.save(update_fields=["status", "updated_at"])
     labels = {
         "prepare": "Détection automatique des mi-temps",
-        "reference": "Référence main.py de 40 secondes",
+        "reference": "Test court de 40 secondes",
         "sample": "Test de validation de 2 minutes",
         "full": "Analyse complète",
     }
@@ -373,9 +409,9 @@ def analysis_status(request: HttpRequest, pk) -> JsonResponse:
     stage_label = run.get_current_stage_display()
     if _run_mode(run) in {"reference", "sample"} and run.current_stage == AnalysisRun.Stage.TRACKING:
         stage_label = (
-            "Référence main.py en direct"
+            f"Test court · {_athlete_engine_label(run)}"
             if _run_mode(run) == "reference"
-            else "Test joueurs, ballon et jeu effectif"
+            else f"Validation 2 min · {_athlete_engine_label(run)}"
         )
     return JsonResponse(
         {
