@@ -36,6 +36,11 @@ if (-not $SkipEasyOcr) {
     if ($LASTEXITCODE -ne 0) {
         throw "Installation EasyOCR impossible. Le .env n'a pas ete modifie."
     }
+    Write-Host "Preparation des poids EasyOCR (telechargement au premier passage)..."
+    & $Python -c "import easyocr; easyocr.Reader(['en'], gpu=False, verbose=False); print('EasyOCR pret')"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Initialisation EasyOCR impossible. Le .env n'a pas ete modifie."
+    }
 }
 
 if (-not (Test-Path $ReIdPath)) {
