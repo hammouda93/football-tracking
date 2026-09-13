@@ -52,6 +52,13 @@ def _athlete_engine_label(run: AnalysisRun | None = None) -> str:
         or settings.ANALYSIS_ATHLETE_ENGINE
         or "legacy"
     ).strip().lower()
+    profile = str(
+        ((run.config or {}).get("yolo_profile") if run else None)
+        or settings.YOLO_PROFILE
+        or ""
+    ).strip().lower()
+    if engine == "legacy" and profile == "native_gsr":
+        return "Native GSR Windows"
     return {
         "legacy": "Moteur local YOLO / ByteTrack",
         "tracklab": "TrackLab + sn-gamestate",
@@ -350,6 +357,8 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_goalkeeper_class_ids": settings.YOLO_GOALKEEPER_CLASS_IDS,
             "yolo_referee_class_ids": settings.YOLO_REFEREE_CLASS_IDS,
             "yolo_ball_class_ids": settings.YOLO_BALL_CLASS_IDS,
+            "native_gsr_reid_model_path": settings.NATIVE_GSR_REID_MODEL_PATH,
+            "native_gsr_max_gap_seconds": settings.NATIVE_GSR_MAX_GAP_SECONDS,
             "gsr_runner_command": settings.GSR_RUNNER_COMMAND,
             "gsr_precomputed_result": settings.GSR_PRECOMPUTED_RESULT,
             "gsr_timeout_seconds": settings.GSR_TIMEOUT_SECONDS,

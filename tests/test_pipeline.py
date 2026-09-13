@@ -12,6 +12,7 @@ from pipeline.ball_in_play import BallInPlayEngine
 from pipeline.events import EventEngine
 from pipeline.periods import PeriodDetector
 from pipeline.providers.yolo import YoloVisionProvider
+from pipeline.providers.native_identity import NativeIdentityRefiner
 from pipeline.stats import StatsAggregator
 from pipeline.runner import MatchAnalysisRunner
 from pipeline.types import (
@@ -495,6 +496,88 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(diagnostics["source"], "video_only")
         self.assertEqual(diagnostics["home_group"], "B")
 
+    def test_native_gsr_removes_duplicate_person_boxes(self):
+        import cv2
+        import numpy as np
+
+        frame = np.full((180, 320, 3), (45, 145, 45), dtype=np.uint8)
+        cv2.rectangle(frame, (80, 25), (120, 150), (30, 30, 190), -1)
+        objects = [
+            TrackedObject("raw-1", "player", (80, 25, 120, 150), 0.91),
+            TrackedObject("raw-2", "player", (82, 30, 122, 150), 0.72),
+        ]
+        refiner = NativeIdentityRefiner(home_team_cluster="B")
+
+        refined = refiner.process(frame, objects, 1_000)
+
+        self.assertEqual(len(refined), 1)
+        self.assertEqual(refined[0].confidence, 0.91)
+        self.assertEqual(refiner.diagnostics()["duplicates_removed"], 1)
+
+    def test_native_gsr_stitches_a_conservative_tracker_fragment(self):
+        import cv2
+        import numpy as np
+
+        frame = np.full((180, 320, 3), (45, 145, 45), dtype=np.uint8)
+        cv2.rectangle(frame, (80, 25), (120, 150), (30, 30, 190), -1)
+        refiner = NativeIdentityRefiner(home_team_cluster="B")
+        first = refiner.process(
+            frame,
+            [TrackedObject("raw-1", "player", (80, 25, 120, 150), 0.91)],
+            1_000,
+        )[0]
+        second = refiner.process(
+            frame,
+            [TrackedObject("raw-99", "player", (82, 25, 122, 150), 0.89)],
+            1_080,
+        )[0]
+
+        self.assertEqual(first.track_id, second.track_id)
+        self.assertEqual(refiner.diagnostics()["fragments_stitched"], 1)
+        self.assertEqual(refiner.diagnostics()["canonical_tracks"], 1)
+
+    def test_native_gsr_learns_teams_from_tracklet_torsos(self):
+        import cv2
+        import numpy as np
+
+        frame = np.full((220, 640, 3), (45, 145, 45), dtype=np.uint8)
+        boxes = []
+        for index in range(6):
+            x = 20 + index * 48
+            box = (x, 30, x + 28, 180)
+            boxes.append((box, "red", f"red-{index}"))
+            cv2.rectangle(frame, (x, 30), (x + 28, 180), (25, 25, 190), -1)
+        for index in range(6):
+            x = 340 + index * 48
+            box = (x, 30, x + 28, 180)
+            boxes.append((box, "white", f"white-{index}"))
+            cv2.rectangle(frame, (x, 30), (x + 28, 180), (240, 240, 240), -1)
+
+        refiner = NativeIdentityRefiner(home_team_cluster="B")
+        refined = []
+        # Three observations calibrate the two video-only jersey clusters, then
+        # three stable votes deliberately lock each tracklet to one team.
+        for frame_index in range(6):
+            refined = refiner.process(
+                frame,
+                [
+                    TrackedObject(raw_id, "player", box, 0.9)
+                    for box, _colour, raw_id in boxes
+                ],
+                1_000 + frame_index * 80,
+            )
+
+        teams = {
+            raw_id: obj.team_key
+            for (_box, _colour, raw_id), obj in zip(boxes, refined)
+        }
+        self.assertTrue(all(teams[f"red-{index}"] == "home" for index in range(6)))
+        self.assertTrue(all(teams[f"white-{index}"] == "away" for index in range(6)))
+        diagnostics = refiner.diagnostics()
+        self.assertEqual(diagnostics["status"], "ready")
+        self.assertEqual(diagnostics["source"], "video_only")
+        self.assertEqual(diagnostics["team_tracklets"], 12)
+
     def test_native_live_window_draws_without_changing_analysis(self):
         import numpy as np
 
@@ -620,6 +703,52 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(diagnostics["average_player_detections_per_frame"], 11.0)
         self.assertEqual(diagnostics["average_tracked_athletes_per_frame"], 4.5)
         self.assertIn("tracker", " ".join(diagnostics["issues"]))
+
+    def test_native_gsr_reports_histogram_fallback_instead_of_claiming_deep_reid(self):
+        diagnostics = MatchAnalysisRunner._tracking_diagnostics(
+            Counter(
+                {
+                    "frames": 100,
+                    "raw_athlete_detections": 1_000,
+                    "athlete_observations": 1_000,
+                    "ball_visible_frames": 50,
+                    "field_frames": 100,
+                    "state_controlled": 50,
+                }
+            ),
+            Counter({"home": 500, "away": 500}),
+            track_count=20,
+            tracking_duration_ms=120_000,
+            profile_name="native_gsr",
+            team_calibration={
+                "status": "ready",
+                "appearance_backend": "histogram",
+                "appearance_error": "",
+            },
+        )
+
+        self.assertEqual(diagnostics["verdict"], "warning")
+        self.assertIn("Re-ID profond", " ".join(diagnostics["issues"]))
+
+    @patch("pipeline.runner.build_provider")
+    def test_native_gsr_profile_selects_native_windows_provider(self, build_provider):
+        runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
+        runner.config = {"yolo_profile": "native_gsr"}
+
+        runner._build_legacy_provider("yolo", "cpu", 12.5)
+
+        self.assertEqual(build_provider.call_args.args[0], "native_gsr")
+        self.assertEqual(build_provider.call_args.kwargs["profile"], "native_gsr")
+
+    @patch("pipeline.runner.build_provider")
+    def test_external_gsr_ball_only_keeps_plain_yolo_provider(self, build_provider):
+        runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
+        runner.config = {"yolo_profile": "native_gsr", "yolo_ball_class_ids": [0]}
+
+        runner._build_legacy_provider("yolo", "cpu", 12.5, ball_only=True)
+
+        self.assertEqual(build_provider.call_args.args[0], "yolo")
+        self.assertEqual(build_provider.call_args.kwargs["player_class_ids"], [])
 
 
 class BallInPlayTests(unittest.TestCase):

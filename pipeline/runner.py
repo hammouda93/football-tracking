@@ -748,11 +748,17 @@ class MatchAnalysisRunner:
         ball_only: bool = False,
     ):
         ball_class_ids = self.config.get("yolo_ball_class_ids", [])
+        profile = str(self.config.get("yolo_profile", "main_py"))
+        provider_name = (
+            "native_gsr"
+            if backend == "yolo" and profile == "native_gsr" and not ball_only
+            else backend
+        )
         return build_provider(
-            backend,
+            provider_name,
             model_path=self.config.get("yolo_model_path", ""),
             device=device,
-            profile=str(self.config.get("yolo_profile", "main_py")),
+            profile=profile,
             confidence=float(self.config.get("yolo_confidence", 0.30)),
             ball_confidence=float(self.config.get("yolo_ball_confidence", 0.12)),
             image_size=int(self.config.get("yolo_image_size", 1280)),
@@ -782,6 +788,12 @@ class MatchAnalysisRunner:
             ball_class_ids=ball_class_ids,
             inference_class_ids=ball_class_ids if ball_only and backend == "yolo" else None,
             home_team_cluster=str(self.config.get("home_team_cluster", "B")),
+            native_gsr_reid_model_path=str(
+                self.config.get("native_gsr_reid_model_path", "")
+            ),
+            native_gsr_max_gap_seconds=float(
+                self.config.get("native_gsr_max_gap_seconds", 3.0)
+            ),
         )
 
     def _build_external_gsr_provider(
@@ -1497,6 +1509,18 @@ class MatchAnalysisRunner:
             failures.append("Les identités de piste se fragmentent beaucoup trop vite.")
         elif diagnostics["tracks_per_minute"] > 50:
             warnings.append("La continuité des pistes est encore fragile.")
+        calibration = diagnostics["team_calibration"]
+        if profile_name == "native_gsr":
+            if calibration.get("status") != "ready":
+                warnings.append(
+                    "Native GSR n’a pas encore assez de tracklets pour stabiliser les deux équipes."
+                )
+            if calibration.get("appearance_backend") == "histogram":
+                warnings.append(
+                    "Le Re-ID profond est absent : les liaisons longues utilisent seulement couleur et texture."
+                )
+            if calibration.get("appearance_error"):
+                warnings.append(str(calibration["appearance_error"]))
         diagnostics["issues"] = failures + warnings
         diagnostics["verdict"] = "fail" if failures else ("warning" if warnings else "pass")
         return diagnostics

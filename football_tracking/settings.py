@@ -101,8 +101,8 @@ ANALYSIS_LIVE_WINDOW = (
     == "1"
 )
 YOLO_PROFILE = os.getenv("YOLO_PROFILE", "main_py").strip().lower()
-if YOLO_PROFILE not in {"main_py", "advanced"}:
-    raise ValueError("YOLO_PROFILE doit valoir main_py ou advanced.")
+if YOLO_PROFILE not in {"main_py", "advanced", "native_gsr"}:
+    raise ValueError("YOLO_PROFILE doit valoir main_py, advanced ou native_gsr.")
 _yolo_model_path = Path(
     os.getenv("YOLO_MODEL_PATH", str(BASE_DIR / "models" / "football-players.pt"))
 )
@@ -121,6 +121,17 @@ YOLO_PLAYER_CLASS_IDS = _csv_ints("YOLO_PLAYER_CLASS_IDS", "2")
 YOLO_GOALKEEPER_CLASS_IDS = _csv_ints("YOLO_GOALKEEPER_CLASS_IDS", "1")
 YOLO_REFEREE_CLASS_IDS = _csv_ints("YOLO_REFEREE_CLASS_IDS", "3")
 YOLO_BALL_CLASS_IDS = _csv_ints("YOLO_BALL_CLASS_IDS", "0")
+_native_gsr_reid_value = os.getenv("NATIVE_GSR_REID_MODEL_PATH", "").strip()
+if _native_gsr_reid_value:
+    _native_gsr_reid_path = Path(_native_gsr_reid_value)
+    NATIVE_GSR_REID_MODEL_PATH = str(
+        _native_gsr_reid_path
+        if _native_gsr_reid_path.is_absolute()
+        else BASE_DIR / _native_gsr_reid_path
+    )
+else:
+    NATIVE_GSR_REID_MODEL_PATH = ""
+NATIVE_GSR_MAX_GAP_SECONDS = float(os.getenv("NATIVE_GSR_MAX_GAP_SECONDS", "3.0"))
 
 # TrackLab/sn-gamestate and SoccernetGSR Winner run in an isolated Python/CUDA
 # environment. A JSON argv avoids shell parsing and keeps paths with spaces safe.
@@ -156,6 +167,16 @@ if YOLO_PROFILE == "main_py":
     YOLO_TRACK_LOW_CONFIDENCE = 0.30
     YOLO_NEW_TRACK_CONFIDENCE = 0.25
     YOLO_TRACK_MATCH_THRESHOLD = 0.80
+elif YOLO_PROFILE == "native_gsr":
+    ANALYSIS_MIN_YOLO_TRACKING_FPS = 12.5
+    YOLO_CONFIDENCE = 0.18
+    YOLO_BALL_CONFIDENCE = 0.12
+    YOLO_IMAGE_SIZE = 1280
+    YOLO_TRACKER = "botsort"
+    YOLO_TRACK_LOW_CONFIDENCE = 0.05
+    YOLO_NEW_TRACK_CONFIDENCE = 0.20
+    YOLO_TRACK_MATCH_THRESHOLD = 0.80
+    YOLO_TRACK_BUFFER_SECONDS = 4.8
 FFMPEG_BINARY = os.getenv("FFMPEG_BINARY", "ffmpeg")
 FFPROBE_BINARY = os.getenv("FFPROBE_BINARY", "ffprobe")
 
