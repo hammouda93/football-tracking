@@ -155,6 +155,7 @@ Les valeurs se trouvent dans `.env` :
 | `YOLO_MODEL_PATH` | `models/football-players.pt` | Poids locaux |
 | `YOLO_CONFIDENCE` | `0.30` | Seuil de détection |
 | `YOLO_BALL_CONFIDENCE` | `0.12` | Seuil séparé du petit ballon ; les joueurs restent à `0.30` |
+| `YOLO_BALL_TILED_RECOVERY` | `1` en Native GSR | Récupération périodique du petit ballon par tuiles |
 | `YOLO_IMAGE_SIZE` | `640` | Résolution d’inférence du prototype `main.py` |
 | `YOLO_TRACKER` | `bytetrack` | Profil historique qui conserve le mieux les joueurs ; `botsort` reste disponible |
 | `YOLO_TRACK_LOW_CONFIDENCE` | `0.30` | Seuil réellement envoyé à ByteTrack dans le profil de référence |
@@ -165,8 +166,12 @@ Les valeurs se trouvent dans `.env` :
 | `YOLO_GOALKEEPER_CLASS_IDS` | `1` | IDs numériques des classes gardien |
 | `YOLO_REFEREE_CLASS_IDS` | `3` | IDs numériques des classes arbitre |
 | `YOLO_BALL_CLASS_IDS` | `0` | IDs numériques des classes ballon |
-| `NATIVE_GSR_REID_MODEL_PATH` | vide | Checkpoint d'embeddings Re-ID optionnel ; le fallback couleur/texture est signalé |
+| `NATIVE_GSR_REID_MODEL_PATH` | vide | Checkpoint OSNet/ONNX d'embeddings ; le script Windows installe OSNet x0.25 |
 | `NATIVE_GSR_MAX_GAP_SECONDS` | `3.0` | Intervalle maximal pour réunir deux fragments compatibles |
+| `NATIVE_GSR_JERSEY_ENGINE` | `auto` | EasyOCR ou classifieur ONNX 0..99, avec vote temporel |
+| `NATIVE_GSR_PITCH_MODEL_PATH` | vide | Checkpoint ONNX de points terrain compatible |
+| `NATIVE_GSR_PITCH_SCHEMA_PATH` | vide | Schéma sémantique exact des 97 sorties du checkpoint |
+| `NATIVE_GSR_STRICT_VALIDATION` | `1` | Bloque la validation si Re-ID/OCR/roster/terrain manquent |
 | `GSR_RUNNER_COMMAND_JSON` | `[]` | Commande argv JSON du sidecar TrackLab/Winner ; aucun shell implicite |
 | `GSR_PRECOMPUTED_RESULT` | vide | Résultat GSR v1 déjà calculé, utile pour répéter les tests sans GPU |
 | `GSR_TIMEOUT_SECONDS` | `43200` | Délai maximal du processus GSR externe |

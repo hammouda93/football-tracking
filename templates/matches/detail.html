@@ -51,6 +51,7 @@
         <div><strong>{{ sample_diagnostics.average_tracked_athletes_per_frame|default:0|floatformat:1 }}</strong><small>joueurs suivis / image</small></div>
         <div><strong>{{ sample_diagnostics.tracker_retention_pct|default:0|floatformat:1 }}%</strong><small>détections gardées par le tracker</small></div>
         <div><strong>{{ sample_diagnostics.ball_visibility_pct|floatformat:1 }}%</strong><small>ballon visible</small></div>
+        <div><strong>{{ sample_diagnostics.pitch_metric_coverage_pct|default:0|floatformat:1 }}%</strong><small>positions terrain métriques</small></div>
         <div><strong>{{ sample_diagnostics.playable_candidate_pct|floatformat:1 }}%</strong><small>jeu effectif candidat</small></div>
         <div><strong>{{ sample_diagnostics.tracks_per_minute|floatformat:1 }}</strong><small>pistes / minute</small></div>
         <div><strong>{{ sample_diagnostics.home_team_share_pct|floatformat:1 }}%</strong><small>{{ match.home_team.short_name }}</small></div>
@@ -62,7 +63,7 @@
       </div>
       <p class="diagnostic-note"><strong>Profil exécuté :</strong> <code>{{ sample_diagnostics.profile|default:"—" }}</code> · <code>{{ sample_diagnostics.tracker|upper }} {{ sample_diagnostics.tracker_frame_rate }} FPS</code>{% if sample_diagnostics.athlete_engine != 'legacy' %} · contrat <code>{{ sample_diagnostics.gsr.schema }}</code> · révision <code>{{ sample_diagnostics.gsr.engine_revision }}</code>{% else %} · <code>imgsz={{ sample_diagnostics.image_size }}</code> · <code>conf={{ sample_diagnostics.detector_confidence }}</code>{% endif %} · ballon local <code>{{ sample_diagnostics.ball_confidence }}</code>. Chaque aperçu montre la source à gauche et les objets réellement transmis à l’analyse à droite.</p>
       {% if sample_diagnostics.team_calibration %}
-        <p class="diagnostic-note"><strong>Identités Native GSR :</strong> {{ sample_diagnostics.team_calibration.status|default:"collecting" }} · Re-ID <code>{{ sample_diagnostics.team_calibration.appearance_backend|default:"—" }}</code> · {{ sample_diagnostics.team_calibration.team_observations|default:0 }} observations maillot · {{ sample_diagnostics.team_calibration.raw_tracks|default:0 }} IDs tracker → {{ sample_diagnostics.team_calibration.canonical_tracks|default:0 }} identités consolidées · {{ sample_diagnostics.team_calibration.fragments_stitched|default:0 }} fragments reliés · {{ sample_diagnostics.team_calibration.duplicates_removed|default:0 }} doublons retirés. Équipes apprises sur la vidéo, sans les couleurs saisies.</p>
+        <p class="diagnostic-note"><strong>Identités Native GSR :</strong> {{ sample_diagnostics.team_calibration.status|default:"collecting" }} · Re-ID <code>{{ sample_diagnostics.team_calibration.appearance_backend|default:"—" }}</code> · OCR <code>{{ sample_diagnostics.team_calibration.jersey.backend|default:"disabled" }}</code> · terrain <code>{{ sample_diagnostics.team_calibration.pitch.maximum_visible_landmarks|default:0 }}/{{ sample_diagnostics.team_calibration.pitch.expected_landmarks|default:97 }} points</code> · {{ sample_diagnostics.team_calibration.raw_tracks|default:0 }} IDs tracker → {{ sample_diagnostics.team_calibration.canonical_tracks|default:0 }} identités · {{ sample_diagnostics.team_calibration.global_reacquisitions|default:0 }} réapparitions longues · {{ sample_diagnostics.team_calibration.jersey_tracklets|default:0 }} numéros stabilisés · {{ sample_diagnostics.team_calibration.roster_resolutions|default:0 }} joueurs du roster résolus. Équipes apprises sur la vidéo, sans les couleurs saisies.</p>
         <form class="sample-manual-validation" method="post" action="{% url 'match-swap-team-clusters' match.pk %}">{% csrf_token %}
           <span><strong>Correspondance actuelle :</strong> groupe {{ home_team_cluster }} = {{ match.home_team.short_name }} · groupe {{ away_team_cluster }} = {{ match.away_team.short_name }}</span>
           <button class="button button-secondary button-small" type="submit">Inverser les équipes A/B</button>
@@ -71,10 +72,11 @@
       {% if sample_previews %}<div class="sample-preview-grid">{% for preview in sample_previews %}<figure><a href="{{ preview.url }}" target="_blank"><img src="{{ preview.url }}" alt="Aperçu annoté MT{{ preview.period }} séquence {{ preview.window }}"></a><figcaption>MT{{ preview.period }} · {{ preview.video_time_ms|timecode }}</figcaption></figure>{% endfor %}</div>{% endif %}
       {% if sample_diagnostics.issues %}<ul class="diagnostic-issues">{% for issue in sample_diagnostics.issues %}<li>{{ issue }}</li>{% endfor %}</ul>{% endif %}
       {% if sample_diagnostics.model_classes %}<p class="diagnostic-note"><strong>Classes lues dans le modèle :</strong> {% for class_id,class_name in sample_diagnostics.model_classes.items %}<code>{{ class_id }}={{ class_name }}</code>{% if not forloop.last %}, {% endif %}{% endfor %}</p>{% endif %}
+      {% if sample_diagnostics.ground_truth.status == 'evaluated' %}<p class="diagnostic-note"><strong>Vérité terrain :</strong> HOTA@0,50 {{ sample_diagnostics.ground_truth.hota_50_pct|floatformat:1 }}% · IDF1 {{ sample_diagnostics.ground_truth.idf1_pct|floatformat:1 }}% · précision {{ sample_diagnostics.ground_truth.precision_pct|floatformat:1 }}% · rappel {{ sample_diagnostics.ground_truth.recall_pct|floatformat:1 }}% · cohérence ID {{ sample_diagnostics.ground_truth.identity_consistency_pct|floatformat:1 }}% · équipe {{ sample_diagnostics.ground_truth.team_accuracy_pct|floatformat:1 }}% · numéro {{ sample_diagnostics.ground_truth.jersey_accuracy_pct|floatformat:1 }}%{% if sample_diagnostics.ground_truth.mean_pitch_error_m != None %} · erreur terrain {{ sample_diagnostics.ground_truth.mean_pitch_error_m|floatformat:1 }} m{% endif %}.</p>{% endif %}
       <div class="sample-windows"><strong>Séquences contrôlées :</strong>{% for window in sample_windows %}<button class="timecode-button" data-video-ms="{{ window.start_ms }}">MT{{ window.period }} · {{ window.start_ms|timecode }} ▶</button>{% endfor %}</div>
-      {% if sample_diagnostics.periods_changed_since_run or sample_diagnostics.team_mapping_changed_since_run %}
+      {% if sample_diagnostics.periods_changed_since_run or sample_diagnostics.team_mapping_changed_since_run or sample_diagnostics.ground_truth_changed_since_run %}
         <p class="sample-validation-warning">La configuration du match a changé depuis ce test. Relance le test de validation avant de continuer.</p>
-      {% elif latest_mode == 'sample' and not sample_diagnostics.manual_approved and sample_diagnostics.verdict != 'pass' and latest_run.status == 'review' %}
+      {% elif latest_mode == 'sample' and not sample_diagnostics.hard_blockers and not sample_diagnostics.manual_approved and sample_diagnostics.verdict != 'pass' and latest_run.status == 'review' %}
         <form class="sample-manual-validation" method="post" action="{% url 'analysis-validate-sample' latest_run.pk %}">{% csrf_token %}
           <label><input type="checkbox" name="confirm" value="yes" required> J’ai vérifié tous les aperçus et j’accepte de continuer malgré les alertes.</label>
           <button class="button button-secondary button-small" type="submit">Valider manuellement et déverrouiller</button>
@@ -117,6 +119,15 @@
         {% else %}<p class="muted">Lancez l’analyse pour obtenir une proposition automatique des deux mi-temps.</p>{% endif %}
       </article>
     </aside>
+  </section>
+
+  <section class="section-block">
+    <div class="section-heading"><div><p class="eyebrow">Mesure objective</p><h2>Vérité terrain du test 2 minutes</h2></div><span class="section-note">Optionnelle, recommandée avant un match complet</span></div>
+    <article class="panel quick-player-form">
+      {% if ground_truth %}<span><strong>{{ ground_truth.frame_count }} images</strong> · {{ ground_truth.row_count }} objets annotés · {{ ground_truth.original_name }}</span>{% else %}<span>Aucun CSV annoté. Après le test 2 min, télécharge la pré-annotation, corrige les boîtes/IDs/équipes/numéros et remplace <code>reviewed=NO</code> par <code>YES</code>.</span>{% endif %}
+      <a class="button button-ghost button-small" href="{% url 'match-export-ground-truth-draft' match.pk %}">Télécharger la pré-annotation 1 FPS</a>
+      <form method="post" enctype="multipart/form-data" action="{% url 'match-import-ground-truth' match.pk %}">{% csrf_token %}{{ ground_truth_form.ground_truth }}<button class="button button-secondary button-small" type="submit">Importer / remplacer</button></form>
+    </article>
   </section>
 
   {% if show_match_results %}<section id="stats" class="section-block">

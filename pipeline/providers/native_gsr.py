@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from pipeline.types import FrameAnalysis
+from pipeline.pitch import NativePitchCalibrator
+from pipeline.types import FrameAnalysis, ObjectRole
 
 from .base import VisionProvider
 from .native_identity import NativeIdentityRefiner
@@ -36,8 +37,42 @@ class NativeGSRVisionProvider(VisionProvider):
         self.refiner = NativeIdentityRefiner(
             home_team_cluster=str(config.get("home_team_cluster", "B")),
             max_gap_seconds=float(config.get("native_gsr_max_gap_seconds", 3.0)),
+            global_max_gap_seconds=float(
+                config.get("native_gsr_global_max_gap_seconds", 7_200.0)
+            ),
             reid_model_path=str(config.get("native_gsr_reid_model_path", "")),
+            reid_backend=str(config.get("native_gsr_reid_backend", "auto")),
+            reid_model_name=str(
+                config.get("native_gsr_reid_model_name", "osnet_x0_25")
+            ),
+            jersey_engine=str(config.get("native_gsr_jersey_engine", "auto")),
+            jersey_model_path=str(
+                config.get("native_gsr_jersey_model_path", "")
+            ),
+            jersey_device=str(config.get("native_gsr_jersey_device", "cpu")),
+            jersey_interval_frames=int(
+                config.get("native_gsr_jersey_interval_frames", 12)
+            ),
+            jersey_minimum_box_height=int(
+                config.get("native_gsr_jersey_minimum_box_height", 72)
+            ),
+            jersey_max_crops_per_frame=int(
+                config.get("native_gsr_jersey_max_crops_per_frame", 4)
+            ),
+            roster=list(config.get("native_gsr_roster") or []),
             device=str(config.get("device", "cpu")),
+        )
+        self.pitch = NativePitchCalibrator(
+            model_path=str(config.get("native_gsr_pitch_model_path", "")),
+            schema_path=str(config.get("native_gsr_pitch_schema_path", "")),
+            confidence=float(config.get("native_gsr_pitch_confidence", 0.20)),
+            interval_frames=int(
+                config.get("native_gsr_pitch_interval_frames", 10)
+            ),
+            hold_frames=int(config.get("native_gsr_pitch_hold_frames", 20)),
+            expected_landmarks=int(
+                config.get("native_gsr_pitch_expected_landmarks", 97)
+            ),
         )
         self.profile = "native_gsr"
         for attribute in (
@@ -50,10 +85,12 @@ class NativeGSRVisionProvider(VisionProvider):
             setattr(self, attribute, getattr(self.base, attribute))
         self.tracker_name = "botsort+native_reid"
         self.adaptive_resizes: list[dict[str, int]] = []
+        self.off_pitch_rejections = 0
 
     def reset(self) -> None:
         self.base.reset()
-        self.refiner.reset()
+        self.refiner.reset_window()
+        self.pitch.reset_shot()
 
     @staticmethod
     def _is_memory_error(exc: RuntimeError) -> bool:
@@ -86,8 +123,43 @@ class NativeGSRVisionProvider(VisionProvider):
                 if not self._is_memory_error(exc) or not self._reduce_image_size():
                     raise
         before = len(analysis.objects)
+        pitch_engine = getattr(self, "pitch", None)
+        pitch_ready = bool(
+            pitch_engine and pitch_engine.update(frame, scene_cut=analysis.scene_cut)
+        )
+        pitch_objects = (
+            pitch_engine.project_boxes(analysis.objects) if pitch_ready else 0
+        )
+        if pitch_objects:
+            analysis.coordinate_space = "pitch_meters"
+        rejected_this_frame = 0
+        if pitch_ready:
+            retained = []
+            for obj in analysis.objects:
+                outside = obj.metadata.get("pitch_outside_distance_m")
+                maximum = (
+                    6.0
+                    if obj.role == str(ObjectRole.REFEREE)
+                    else 3.0
+                )
+                if (
+                    outside is not None
+                    and obj.role
+                    in {
+                        str(ObjectRole.PLAYER),
+                        str(ObjectRole.GOALKEEPER),
+                        str(ObjectRole.REFEREE),
+                    }
+                    and float(outside) > maximum
+                ):
+                    self.off_pitch_rejections += 1
+                    rejected_this_frame += 1
+                    continue
+                retained.append(obj)
+            analysis.objects = retained
         analysis.objects = self.refiner.process(frame, analysis.objects, timestamp_ms)
         identity = self.refiner.diagnostics()
+        pitch = pitch_engine.diagnostics() if pitch_engine else {"backend": "disabled"}
         removed = max(0, before - len(analysis.objects))
         analysis.diagnostics["duplicate_person_detections"] = int(
             analysis.diagnostics.get("duplicate_person_detections", 0)
@@ -98,8 +170,17 @@ class NativeGSRVisionProvider(VisionProvider):
         analysis.diagnostics["adaptive_image_resizes"] = list(self.adaptive_resizes)
         analysis.diagnostics["image_size"] = self.image_size
         analysis.diagnostics["native_identity"] = identity
-        analysis.diagnostics["team_calibration"] = identity
+        analysis.diagnostics["pitch_calibration"] = pitch
+        analysis.diagnostics["rejected_person_detections"] = int(
+            analysis.diagnostics.get("rejected_person_detections", 0)
+        ) + rejected_this_frame
+        analysis.diagnostics["team_calibration"] = {**identity, "pitch": pitch}
         return analysis
 
     def team_calibration_diagnostics(self) -> dict:
-        return self.refiner.diagnostics()
+        return {
+            **self.refiner.diagnostics(),
+            "pitch": self.pitch.diagnostics(),
+            "ball": self.base.ball_recovery_diagnostics(),
+            "off_pitch_rejections": self.off_pitch_rejections,
+        }

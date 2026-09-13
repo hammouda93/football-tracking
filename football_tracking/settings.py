@@ -12,6 +12,14 @@ def _csv_ints(name: str, default: str = "") -> list[int]:
     return [int(value.strip()) for value in os.getenv(name, default).split(",") if value.strip()]
 
 
+def _optional_project_path(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        return ""
+    path = Path(value)
+    return str(path if path.is_absolute() else BASE_DIR / path)
+
+
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "football-tracking-local-development-key")
 DEBUG = os.getenv("DJANGO_DEBUG", "1") == "1"
 ALLOWED_HOSTS = [
@@ -111,6 +119,19 @@ YOLO_MODEL_PATH = str(
 )
 YOLO_CONFIDENCE = float(os.getenv("YOLO_CONFIDENCE", "0.30"))
 YOLO_BALL_CONFIDENCE = float(os.getenv("YOLO_BALL_CONFIDENCE", "0.12"))
+YOLO_BALL_TILED_RECOVERY = os.getenv(
+    "YOLO_BALL_TILED_RECOVERY",
+    "1" if YOLO_PROFILE == "native_gsr" else "0",
+) == "1"
+YOLO_BALL_RECOVERY_INTERVAL_FRAMES = int(
+    os.getenv("YOLO_BALL_RECOVERY_INTERVAL_FRAMES", "12")
+)
+YOLO_BALL_RECOVERY_IMAGE_SIZE = int(
+    os.getenv("YOLO_BALL_RECOVERY_IMAGE_SIZE", "960")
+)
+YOLO_BALL_RECOVERY_OVERLAP = float(
+    os.getenv("YOLO_BALL_RECOVERY_OVERLAP", "0.15")
+)
 YOLO_IMAGE_SIZE = int(os.getenv("YOLO_IMAGE_SIZE", "1280"))
 YOLO_TRACKER = os.getenv("YOLO_TRACKER", "bytetrack")
 YOLO_TRACK_LOW_CONFIDENCE = float(os.getenv("YOLO_TRACK_LOW_CONFIDENCE", "0.10"))
@@ -121,17 +142,57 @@ YOLO_PLAYER_CLASS_IDS = _csv_ints("YOLO_PLAYER_CLASS_IDS", "2")
 YOLO_GOALKEEPER_CLASS_IDS = _csv_ints("YOLO_GOALKEEPER_CLASS_IDS", "1")
 YOLO_REFEREE_CLASS_IDS = _csv_ints("YOLO_REFEREE_CLASS_IDS", "3")
 YOLO_BALL_CLASS_IDS = _csv_ints("YOLO_BALL_CLASS_IDS", "0")
-_native_gsr_reid_value = os.getenv("NATIVE_GSR_REID_MODEL_PATH", "").strip()
-if _native_gsr_reid_value:
-    _native_gsr_reid_path = Path(_native_gsr_reid_value)
-    NATIVE_GSR_REID_MODEL_PATH = str(
-        _native_gsr_reid_path
-        if _native_gsr_reid_path.is_absolute()
-        else BASE_DIR / _native_gsr_reid_path
+NATIVE_GSR_REID_MODEL_PATH = _optional_project_path("NATIVE_GSR_REID_MODEL_PATH")
+NATIVE_GSR_REID_BACKEND = os.getenv("NATIVE_GSR_REID_BACKEND", "auto").strip().lower()
+if NATIVE_GSR_REID_BACKEND not in {"auto", "torchreid", "onnx", "ultralytics"}:
+    raise ValueError(
+        "NATIVE_GSR_REID_BACKEND doit valoir auto, torchreid, onnx ou ultralytics."
     )
-else:
-    NATIVE_GSR_REID_MODEL_PATH = ""
+NATIVE_GSR_REID_MODEL_NAME = os.getenv(
+    "NATIVE_GSR_REID_MODEL_NAME", "osnet_x0_25"
+).strip()
 NATIVE_GSR_MAX_GAP_SECONDS = float(os.getenv("NATIVE_GSR_MAX_GAP_SECONDS", "3.0"))
+NATIVE_GSR_GLOBAL_MAX_GAP_SECONDS = float(
+    os.getenv("NATIVE_GSR_GLOBAL_MAX_GAP_SECONDS", "7200.0")
+)
+NATIVE_GSR_JERSEY_ENGINE = os.getenv("NATIVE_GSR_JERSEY_ENGINE", "auto").strip().lower()
+if NATIVE_GSR_JERSEY_ENGINE not in {"auto", "off", "onnx", "easyocr"}:
+    raise ValueError(
+        "NATIVE_GSR_JERSEY_ENGINE doit valoir auto, off, onnx ou easyocr."
+    )
+NATIVE_GSR_JERSEY_MODEL_PATH = _optional_project_path(
+    "NATIVE_GSR_JERSEY_MODEL_PATH"
+)
+NATIVE_GSR_JERSEY_DEVICE = os.getenv(
+    "NATIVE_GSR_JERSEY_DEVICE", "cpu"
+).strip()
+NATIVE_GSR_JERSEY_INTERVAL_FRAMES = int(
+    os.getenv("NATIVE_GSR_JERSEY_INTERVAL_FRAMES", "12")
+)
+NATIVE_GSR_JERSEY_MINIMUM_BOX_HEIGHT = int(
+    os.getenv("NATIVE_GSR_JERSEY_MINIMUM_BOX_HEIGHT", "72")
+)
+NATIVE_GSR_JERSEY_MAX_CROPS_PER_FRAME = int(
+    os.getenv("NATIVE_GSR_JERSEY_MAX_CROPS_PER_FRAME", "4")
+)
+NATIVE_GSR_PITCH_MODEL_PATH = _optional_project_path("NATIVE_GSR_PITCH_MODEL_PATH")
+NATIVE_GSR_PITCH_SCHEMA_PATH = _optional_project_path("NATIVE_GSR_PITCH_SCHEMA_PATH")
+NATIVE_GSR_PITCH_CONFIDENCE = float(
+    os.getenv("NATIVE_GSR_PITCH_CONFIDENCE", "0.20")
+)
+NATIVE_GSR_PITCH_INTERVAL_FRAMES = int(
+    os.getenv("NATIVE_GSR_PITCH_INTERVAL_FRAMES", "10")
+)
+NATIVE_GSR_PITCH_HOLD_FRAMES = int(
+    os.getenv("NATIVE_GSR_PITCH_HOLD_FRAMES", "20")
+)
+NATIVE_GSR_PITCH_EXPECTED_LANDMARKS = int(
+    os.getenv("NATIVE_GSR_PITCH_EXPECTED_LANDMARKS", "97")
+)
+NATIVE_GSR_STRICT_VALIDATION = os.getenv("NATIVE_GSR_STRICT_VALIDATION", "1") == "1"
+NATIVE_GSR_REQUIRE_GROUND_TRUTH = (
+    os.getenv("NATIVE_GSR_REQUIRE_GROUND_TRUTH", "0") == "1"
+)
 
 # TrackLab/sn-gamestate and SoccernetGSR Winner run in an isolated Python/CUDA
 # environment. A JSON argv avoids shell parsing and keeps paths with spaces safe.

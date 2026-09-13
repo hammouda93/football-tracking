@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import mimetypes
 import os
 import re
+import tempfile
 
 from django.conf import settings
 from django.contrib import messages
@@ -23,9 +25,16 @@ from django.utils import timezone
 from django.utils.http import content_disposition_header
 from django.views.decorators.http import require_GET, require_POST
 
-from .forms import EventReviewForm, MatchUploadForm, PlayerForm, RosterUploadForm
+from .forms import (
+    EventReviewForm,
+    MatchUploadForm,
+    PlayerForm,
+    RosterUploadForm,
+    TrackingGroundTruthUploadForm,
+)
 from .models import (
     AnalysisRun,
+    AnalysisArtifact,
     Event,
     Match,
     MatchPeriod,
@@ -35,6 +44,7 @@ from .models import (
     PossessionSegment,
     TeamMatchStat,
     Track,
+    TrackingGroundTruth,
 )
 from .services import create_match_from_upload, import_roster_csv, parse_timecode
 
@@ -81,9 +91,12 @@ def _passing_sample_run(match: Match) -> AnalysisRun | None:
         approved = diagnostics.get("verdict") == "pass" or diagnostics.get(
             "manual_approved", False
         )
+        approved = approved and not diagnostics.get("hard_blockers")
         configuration_current = not diagnostics.get(
             "periods_changed_since_run", False
-        ) and not diagnostics.get("team_mapping_changed_since_run", False)
+        ) and not diagnostics.get(
+            "team_mapping_changed_since_run", False
+        ) and not diagnostics.get("ground_truth_changed_since_run", False)
         if terminal and approved and configuration_current:
             return run
     return None
@@ -142,6 +155,7 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
         events = events.filter(team_id=team_id)
 
     periods = list(match.periods.all())
+    ground_truth = TrackingGroundTruth.objects.filter(match=match).first()
     show_match_results = (
         latest_run is not None
         and latest_mode == "full"
@@ -226,8 +240,169 @@ def match_detail(request: HttpRequest, pk) -> HttpResponse:
         "away_players": match.away_team.players.filter(active=True),
         "player_form": PlayerForm(),
         "roster_form": RosterUploadForm(),
+        "ground_truth": ground_truth,
+        "ground_truth_form": TrackingGroundTruthUploadForm(),
     }
     return render(request, "matches/detail.html", context)
+
+
+@require_POST
+def import_tracking_ground_truth(request: HttpRequest, pk) -> HttpResponse:
+    from pipeline.evaluation import validate_ground_truth
+
+    match = get_object_or_404(Match, pk=pk)
+    form = TrackingGroundTruthUploadForm(request.POST, request.FILES)
+    if not form.is_valid():
+        messages.error(request, "CSV de vérité terrain invalide.")
+        return redirect(match)
+    uploaded = form.cleaned_data["ground_truth"]
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".csv") as temporary:
+            for chunk in uploaded.chunks():
+                temporary.write(chunk)
+            temporary.flush()
+            metadata = validate_ground_truth(temporary.name)
+        uploaded.seek(0)
+        truth = TrackingGroundTruth.objects.filter(match=match).first()
+        if truth is None:
+            truth = TrackingGroundTruth(match=match)
+        truth.original_name = uploaded.name
+        truth.row_count = int(metadata["objects"])
+        truth.frame_count = int(metadata["frames"])
+        truth.metadata = metadata
+        truth.file = uploaded
+        truth.save()
+    except (OSError, UnicodeError, ValueError) as exc:
+        messages.error(request, f"Vérité terrain refusée : {exc}")
+        return redirect(match)
+    for run in match.analysis_runs.all()[:25]:
+        if _run_mode(run) != "sample" or not run.metrics:
+            continue
+        metrics = dict(run.metrics)
+        diagnostics = dict(metrics.get("diagnostics") or {})
+        diagnostics["ground_truth_changed_since_run"] = True
+        diagnostics["manual_approved"] = False
+        metrics["diagnostics"] = diagnostics
+        run.metrics = metrics
+        run.save(update_fields=["metrics"])
+    messages.success(
+        request,
+        f"Vérité terrain importée : {metadata['frames']} images, {metadata['objects']} objets.",
+    )
+    return redirect(match)
+
+
+@require_GET
+def export_tracking_ground_truth_draft(request: HttpRequest, pk) -> HttpResponse:
+    """Export sparse model predictions as a human-review worksheet.
+
+    It is intentionally rejected on re-import until every retained row is marked
+    reviewed=YES; scoring predictions against their own untouched output would
+    be a circular and meaningless validation.
+    """
+
+    match = get_object_or_404(Match, pk=pk)
+    run = next(
+        (
+            candidate
+            for candidate in match.analysis_runs.all()[:25]
+            if _run_mode(candidate) == "sample"
+            and candidate.status
+            in {AnalysisRun.Status.REVIEW, AnalysisRun.Status.COMPLETED}
+        ),
+        None,
+    )
+    artifact = (
+        AnalysisArtifact.objects.filter(
+            analysis_run=run,
+            kind=AnalysisArtifact.Kind.TRACKING,
+        ).first()
+        if run is not None
+        else None
+    )
+    output = io.StringIO(newline="")
+    fieldnames = [
+        "timestamp_ms",
+        "object_id",
+        "role",
+        "x1",
+        "y1",
+        "x2",
+        "y2",
+        "team",
+        "shirt_number",
+        "pitch_x",
+        "pitch_y",
+        "reviewed",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    writer.writeheader()
+    if artifact is not None and artifact.file:
+        last_exported: dict[tuple[int, int], int] = {}
+        try:
+            with open(artifact.file.path, "r", encoding="utf-8") as source:
+                for line in source:
+                    if not line.strip():
+                        continue
+                    payload = json.loads(line)
+                    frame = payload.get("frame") or {}
+                    timestamp_ms = int(frame.get("timestamp_ms", -1))
+                    window_key = (
+                        int(payload.get("period", 0)),
+                        int(payload.get("window", 0)),
+                    )
+                    if timestamp_ms - last_exported.get(window_key, -10_000) < 1_000:
+                        continue
+                    last_exported[window_key] = timestamp_ms
+                    for obj in frame.get("objects") or []:
+                        if str(obj.get("role") or "") not in {
+                            "player",
+                            "goalkeeper",
+                            "referee",
+                        }:
+                            continue
+                        bbox = obj.get("bbox_xyxy") or []
+                        if len(bbox) != 4:
+                            continue
+                        writer.writerow(
+                            {
+                                "timestamp_ms": timestamp_ms,
+                                "object_id": obj.get("track_id", ""),
+                                "role": obj.get("role", ""),
+                                "x1": round(float(bbox[0]), 2),
+                                "y1": round(float(bbox[1]), 2),
+                                "x2": round(float(bbox[2]), 2),
+                                "y2": round(float(bbox[3]), 2),
+                                "team": obj.get("team_key") or "",
+                                "shirt_number": (
+                                    obj.get("shirt_number")
+                                    if obj.get("shirt_number") is not None
+                                    else ""
+                                ),
+                                "pitch_x": (
+                                    round(float(obj["pitch_x"]), 3)
+                                    if obj.get("pitch_x") is not None
+                                    else ""
+                                ),
+                                "pitch_y": (
+                                    round(float(obj["pitch_y"]), 3)
+                                    if obj.get("pitch_y") is not None
+                                    else ""
+                                ),
+                                "reviewed": "NO",
+                            }
+                        )
+        except (OSError, ValueError, json.JSONDecodeError):
+            # The header remains useful and avoids exposing a half-written file.
+            output = io.StringIO(newline="")
+            writer = csv.DictWriter(output, fieldnames=fieldnames)
+            writer.writeheader()
+    response = HttpResponse(output.getvalue(), content_type="text/csv; charset=utf-8")
+    response["Content-Disposition"] = content_disposition_header(
+        True,
+        f"tracking-ground-truth-{match.pk}.csv",
+    )
+    return response
 
 
 def _range_file_iterator(
@@ -347,6 +522,10 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_model_path": settings.YOLO_MODEL_PATH,
             "yolo_confidence": settings.YOLO_CONFIDENCE,
             "yolo_ball_confidence": settings.YOLO_BALL_CONFIDENCE,
+            "yolo_ball_tiled_recovery": settings.YOLO_BALL_TILED_RECOVERY,
+            "yolo_ball_recovery_interval_frames": settings.YOLO_BALL_RECOVERY_INTERVAL_FRAMES,
+            "yolo_ball_recovery_image_size": settings.YOLO_BALL_RECOVERY_IMAGE_SIZE,
+            "yolo_ball_recovery_overlap": settings.YOLO_BALL_RECOVERY_OVERLAP,
             "yolo_image_size": settings.YOLO_IMAGE_SIZE,
             "yolo_tracker": settings.YOLO_TRACKER,
             "yolo_track_low_confidence": settings.YOLO_TRACK_LOW_CONFIDENCE,
@@ -358,7 +537,40 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "yolo_referee_class_ids": settings.YOLO_REFEREE_CLASS_IDS,
             "yolo_ball_class_ids": settings.YOLO_BALL_CLASS_IDS,
             "native_gsr_reid_model_path": settings.NATIVE_GSR_REID_MODEL_PATH,
+            "native_gsr_reid_backend": settings.NATIVE_GSR_REID_BACKEND,
+            "native_gsr_reid_model_name": settings.NATIVE_GSR_REID_MODEL_NAME,
             "native_gsr_max_gap_seconds": settings.NATIVE_GSR_MAX_GAP_SECONDS,
+            "native_gsr_global_max_gap_seconds": settings.NATIVE_GSR_GLOBAL_MAX_GAP_SECONDS,
+            "native_gsr_jersey_engine": settings.NATIVE_GSR_JERSEY_ENGINE,
+            "native_gsr_jersey_model_path": settings.NATIVE_GSR_JERSEY_MODEL_PATH,
+            "native_gsr_jersey_device": settings.NATIVE_GSR_JERSEY_DEVICE,
+            "native_gsr_jersey_interval_frames": settings.NATIVE_GSR_JERSEY_INTERVAL_FRAMES,
+            "native_gsr_jersey_minimum_box_height": settings.NATIVE_GSR_JERSEY_MINIMUM_BOX_HEIGHT,
+            "native_gsr_jersey_max_crops_per_frame": settings.NATIVE_GSR_JERSEY_MAX_CROPS_PER_FRAME,
+            "native_gsr_pitch_model_path": settings.NATIVE_GSR_PITCH_MODEL_PATH,
+            "native_gsr_pitch_schema_path": settings.NATIVE_GSR_PITCH_SCHEMA_PATH,
+            "native_gsr_pitch_confidence": settings.NATIVE_GSR_PITCH_CONFIDENCE,
+            "native_gsr_pitch_interval_frames": settings.NATIVE_GSR_PITCH_INTERVAL_FRAMES,
+            "native_gsr_pitch_hold_frames": settings.NATIVE_GSR_PITCH_HOLD_FRAMES,
+            "native_gsr_pitch_expected_landmarks": settings.NATIVE_GSR_PITCH_EXPECTED_LANDMARKS,
+            "native_gsr_strict_validation": settings.NATIVE_GSR_STRICT_VALIDATION,
+            "native_gsr_require_ground_truth": settings.NATIVE_GSR_REQUIRE_GROUND_TRUTH,
+            "native_gsr_roster": [
+                {
+                    "id": player.pk,
+                    "name": player.name,
+                    "shirt_number": player.shirt_number,
+                    "position": player.position,
+                    "team_key": (
+                        "home" if player.team_id == match.home_team_id else "away"
+                    ),
+                }
+                for player in Player.objects.filter(
+                    team_id__in=[match.home_team_id, match.away_team_id],
+                    active=True,
+                    shirt_number__isnull=False,
+                )
+            ],
             "gsr_runner_command": settings.GSR_RUNNER_COMMAND,
             "gsr_precomputed_result": settings.GSR_PRECOMPUTED_RESULT,
             "gsr_timeout_seconds": settings.GSR_TIMEOUT_SECONDS,
@@ -490,6 +702,20 @@ def validate_sample(request: HttpRequest, pk) -> HttpResponse:
         messages.warning(
             request,
             "Les limites des mi-temps ont changé. Relance le test rapide avant de le valider.",
+        )
+        return redirect(run.match)
+    if diagnostics.get("team_mapping_changed_since_run") or diagnostics.get(
+        "ground_truth_changed_since_run"
+    ):
+        messages.warning(
+            request,
+            "La configuration du match a changé. Relance le test de 2 minutes.",
+        )
+        return redirect(run.match)
+    if diagnostics.get("hard_blockers"):
+        messages.error(
+            request,
+            "Validation manuelle refusée : un module obligatoire est absent ou a échoué.",
         )
         return redirect(run.match)
     diagnostics["manual_approved"] = True

@@ -15,8 +15,15 @@ tests 40 s / 2 min, le live, le ballon, le jeu effectif et les exports.
 6. Les deux maillots sont appris par K-means sur les torses de plusieurs
    tracklets. Les couleurs saisies à l'import ne participent pas au calcul.
 7. La correspondance groupe A/B vers ST/CSS reste inversable dans l'interface.
-8. La position image utilise le bas-centre de la boîte. La position terrain en
-   mètres n'est produite que lorsqu'une homographie valable est disponible.
+8. OSNet produit une signature d'apparence profonde et réacquiert prudemment
+   un joueur après une coupure ; la couleur de peau n'est ni nécessaire ni
+   utilisée comme identité.
+9. EasyOCR lit les numéros sur plusieurs images. Un vote pondéré au niveau de
+   la piste rattache ensuite le numéro à l'effectif importé.
+10. Le calibrateur ONNX accepte exactement les 97 points et le schéma du modèle,
+    rejette les homographies instables et remet son état à zéro au changement de plan.
+11. Une passe multi-échelle récupère périodiquement le petit ballon sans créer
+    arbitrairement un ballon loin de tout joueur.
 
 Cette structure reprend les principes publiés de TrackLab/`sn-gamestate`
 (composants séparés, état par tracklet, apparence, équipe, projection terrain)
@@ -53,6 +60,13 @@ YOLO_BALL_CLASS_IDS=0
 
 NATIVE_GSR_REID_MODEL_PATH=
 NATIVE_GSR_MAX_GAP_SECONDS=3.0
+NATIVE_GSR_JERSEY_ENGINE=easyocr
+NATIVE_GSR_JERSEY_DEVICE=cpu
+NATIVE_GSR_JERSEY_INTERVAL_FRAMES=12
+NATIVE_GSR_JERSEY_MAX_CROPS_PER_FRAME=4
+NATIVE_GSR_PITCH_MODEL_PATH=
+NATIVE_GSR_PITCH_SCHEMA_PATH=
+NATIVE_GSR_STRICT_VALIDATION=1
 ```
 
 Les valeurs centrales du profil sont figées dans les réglages Django afin
@@ -75,37 +89,51 @@ de couleur et texture. Il convient aux liaisons courtes mais ne suffit pas pour
 garantir l'identité d'un joueur après une longue disparition. L'interface
 affiche alors `histogram` et ajoute un avertissement au verdict.
 
-Un checkpoint compatible d'embeddings peut être indiqué dans
-`NATIVE_GSR_REID_MODEL_PATH`. Le moteur n'assimile jamais
-`football-players.pt` à un modèle OCR de maillot : le premier détecte des objets,
-le second problème demande des poids Re-ID/OCR spécialisés et une évaluation
-séparée.
+Le script `install_native_identity_windows.ps1` installe la révision épinglée de
+Torchreid, télécharge OSNet x0.25 MSMT17 et vérifie son SHA-256. Il installe aussi
+EasyOCR sur CPU afin de conserver les 4 Go de VRAM pour YOLO et OSNet. Le moteur
+n'assimile jamais `football-players.pt` à un modèle OCR de maillot.
+
+Le raccordement au roster devient automatique uniquement si les CSV des deux
+clubs contiennent des numéros réels et uniques. Une lecture ambiguë reste
+« inconnue » au lieu d'attribuer un mauvais nom.
 
 ## Protocole de validation
 
 1. Conserver le match déjà importé ; aucun nouvel upload n'est requis.
-2. Vérifier et confirmer les limites des deux mi-temps.
-3. Lancer le test court de 40 s et observer le live.
-4. Contrôler la détection, les doublons, ST/CSS, arbitres et ballon.
-5. Lancer le test continu de 2 min seulement si les huit extraits sont crédibles.
-6. Autoriser le match complet seulement si le test 2 min est validé, ou après
-   validation humaine explicite d'un avertissement compris.
+2. Importer les deux effectifs CSV (`name,shirt_number,position`).
+3. Recalculer les mi-temps, utiliser « Voir » puis confirmer les quatre limites.
+4. Lancer **2a. Référence main.py · 40 s** et observer le live.
+5. Contrôler détection, doublons, ST/CSS, arbitres, gardiens, ballon et stabilité IDs.
+6. Lancer **2b. Test de validation · 2 min**. Il traite deux séquences continues
+   de 60 s, une dans chaque mi-temps, avec exactement le moteur du match complet.
+7. Télécharger la pré-annotation CSV, corriger les boîtes/IDs/équipes/numéros,
+   passer `reviewed=YES`, puis la réimporter pour obtenir HOTA@0.50 et IDF1.
+8. Lancer le match complet seulement lorsque les bloqueurs stricts sont levés.
 
 Les indicateurs importants sont : joueurs détectés/suivis par image, ballon
 visible, IDs tracker vers identités consolidées, fragments reliés, doublons
 retirés, pistes par minute et équilibre des deux équipes.
 
-## Ce qui reste nécessaire pour atteindre la référence GSR
+## Ce qui est livré et ce qui ne l'est pas
 
-- poids Re-ID football évalués sur cette caméra ;
-- OCR de numéro avec vote au niveau du tracklet ;
-- réseau de points-clés du terrain et calibration automatique par plan ;
-- ball tracker spécialisé à haute fréquence ;
-- vérité terrain annotée pour mesurer HOTA, IDF1, mAP et erreur métrique.
+| Module | État natif Windows |
+|---|---|
+| Re-ID longue durée | OSNet installé et fusion conservatrice |
+| Numéro de maillot | EasyOCR + vote temporel + roster |
+| Équipes | apprentissage vidéo, indépendant des couleurs saisies |
+| Ballon | passe plein cadre + récupération multi-échelle |
+| Terrain | adaptateur ONNX 97 points + RANSAC livré |
+| Mesure | CSV humain, IDF1, HOTA@0.50, équipe, maillot, erreur terrain |
 
-Ces modules sont des étapes mesurables, pas des résultats simulés. Le runner
-officiel TrackLab + `sn-gamestate` reste disponible comme référence externe
-GPL-3.0 lorsque WSL/Linux fonctionne.
+Le dépôt ne distribue pas de checkpoint terrain 97 points compatible et licencié.
+Il faut fournir **ensemble** le `.onnx` et son schéma sémantique exact. Sans eux,
+le test reste exécutable mais la validation stricte signale le terrain comme
+bloqueur ; aucune fausse coordonnée n'est fabriquée. HOTA@0.50 est un contrôle
+local à un seuil, pas le HOTA multi-seuil ni le GS-HOTA officiel.
+
+Le runner officiel TrackLab + `sn-gamestate` reste disponible comme référence
+externe GPL-3.0 lorsque Linux/WSL fonctionne.
 
 ## Licences et références
 

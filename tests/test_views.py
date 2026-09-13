@@ -7,7 +7,14 @@ from django.test import TestCase
 from django.test.utils import override_settings
 from django.urls import reverse
 
-from matches.models import AnalysisRun, Match, MatchPeriod, MatchVideo, Team
+from matches.models import (
+    AnalysisArtifact,
+    AnalysisRun,
+    Match,
+    MatchPeriod,
+    MatchVideo,
+    Team,
+)
 from pipeline.runner import MatchAnalysisRunner
 from pipeline.types import FrameSignal
 
@@ -404,3 +411,47 @@ class DashboardTests(TestCase):
                 self.assertEqual(response["Content-Range"], "bytes 4-7/16")
                 self.assertEqual(response["Content-Length"], "4")
                 self.assertEqual(b"".join(response.streaming_content), b"4567")
+
+    def test_ground_truth_draft_exports_sparse_predictions_for_human_review(self):
+        home = Team.objects.create(name="Home", short_name="HOM")
+        away = Team.objects.create(name="Away", short_name="AWY")
+        match = Match.objects.create(home_team=home, away_team=away)
+        run = AnalysisRun.objects.create(
+            match=match,
+            status=AnalysisRun.Status.COMPLETED,
+            config={"analysis_mode": "sample"},
+        )
+        rows = []
+        for timestamp_ms in (1_000, 1_500, 2_000):
+            rows.append(
+                '{"period":1,"window":1,"frame":{"timestamp_ms":'
+                + str(timestamp_ms)
+                + ',"objects":[{"track_id":"native-1","role":"player",'
+                '"bbox_xyxy":[10,20,30,80],"team_key":"home",'
+                '"shirt_number":10,"pitch_x":20,"pitch_y":30}]}}'
+            )
+
+        with tempfile.TemporaryDirectory() as media_root, override_settings(
+            MEDIA_ROOT=Path(media_root)
+        ):
+            artifact = AnalysisArtifact.objects.create(
+                analysis_run=run,
+                kind=AnalysisArtifact.Kind.TRACKING,
+            )
+            artifact.file.save(
+                "tracking.ndjson",
+                SimpleUploadedFile(
+                    "tracking.ndjson",
+                    "\n".join(rows).encode("utf-8"),
+                ),
+            )
+
+            response = self.client.get(
+                reverse("match-export-ground-truth-draft", kwargs={"pk": match.pk})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("reviewed", body)
+        self.assertEqual(body.count("native-1"), 2)
+        self.assertEqual(body.count("NO"), 2)

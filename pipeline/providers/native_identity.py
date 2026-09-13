@@ -8,6 +8,7 @@ from typing import Iterable
 
 import numpy as np
 
+from pipeline.jersey import JerseyNumberRecognizer, JerseyObservation, WeightedNumberVote
 from pipeline.types import ObjectRole, TrackedObject
 
 
@@ -57,14 +58,25 @@ def _box_height(box: Iterable[float]) -> float:
 class IdentityState:
     canonical_id: int
     role: str
+    first_timestamp_ms: int
     last_timestamp_ms: int
     last_bbox: tuple[float, float, float, float]
+    last_pitch: tuple[float, float] | None = None
     appearance: np.ndarray | None = None
     team_feature_sum: np.ndarray | None = None
     team_feature_count: int = 0
     team_votes: Counter = field(default_factory=Counter)
     team_label: str | None = None
+    role_votes: Counter = field(default_factory=Counter)
+    jersey_vote: WeightedNumberVote = field(default_factory=WeightedNumberVote)
+    jersey_number: int | None = None
+    jersey_confidence: float = 0.0
+    roster_player_id: int | None = None
+    roster_player_name: str = ""
+    roster_resolved_number: int | None = None
+    roster_resolved_team: str | None = None
     raw_track_ids: set[str] = field(default_factory=set)
+    windows_seen: set[int] = field(default_factory=set)
     observations: int = 0
 
     @property
@@ -82,9 +94,18 @@ class NativeAppearanceEncoder:
     pipeline operational and the diagnostics explicitly report the fallback.
     """
 
-    def __init__(self, model_path: str = "", device: str = "cpu"):
+    def __init__(
+        self,
+        model_path: str = "",
+        device: str = "cpu",
+        *,
+        backend: str = "auto",
+        model_name: str = "osnet_x0_25",
+    ):
         self.model_path = str(model_path or "").strip()
         self.device = device
+        self.requested_backend = str(backend or "auto").strip().lower()
+        self.model_name = str(model_name or "osnet_x0_25").strip()
         self.model = None
         self.model_kind = ""
         self.backend = "histogram"
@@ -95,12 +116,29 @@ class NativeAppearanceEncoder:
             self.error = f"Poids Re-ID absents ou invalides: {self.model_path}"
             return
         try:
-            if Path(self.model_path).suffix.lower() == ".onnx":
+            suffixes = "".join(Path(self.model_path).suffixes).lower()
+            if suffixes.endswith(".onnx"):
                 import cv2
 
                 self.model = cv2.dnn.readNetFromONNX(self.model_path)
                 self.model_kind = "onnx"
                 self.backend = "onnx_embeddings"
+                return
+            if self.requested_backend == "torchreid" or ".pth" in suffixes:
+                from torchreid.utils import FeatureExtractor
+
+                torch_device = (
+                    "cpu"
+                    if str(self.device).strip().lower() in {"", "cpu", "none"}
+                    else "cuda"
+                )
+                self.model = FeatureExtractor(
+                    model_name=self.model_name,
+                    model_path=self.model_path,
+                    device=torch_device,
+                )
+                self.model_kind = "torchreid"
+                self.backend = f"torchreid_{self.model_name}"
                 return
             from ultralytics import YOLO
 
@@ -117,13 +155,17 @@ class NativeAppearanceEncoder:
     def _crop(frame, box, *, torso: bool = False):
         height, width = frame.shape[:2]
         x1, y1, x2, y2 = [float(value) for value in box]
+        box_height = max(1.0, y2 - y1)
         if torso:
             box_width = max(1.0, x2 - x1)
-            box_height = max(1.0, y2 - y1)
             x1 += box_width * 0.18
             x2 -= box_width * 0.18
             y1 += box_height * 0.12
             y2 = y1 + box_height * 0.46
+        else:
+            # Remove most of the head/background. Identity comes from kit,
+            # silhouette and texture; no explicit skin-colour feature is stored.
+            y1 += box_height * 0.06
         left = max(0, min(width - 1, int(round(x1))))
         right = max(left + 1, min(width, int(round(x2))))
         top = max(0, min(height - 1, int(round(y1))))
@@ -211,6 +253,14 @@ class NativeAppearanceEncoder:
                     self.model.setInput(np.asarray(tensors, dtype=np.float32))
                     outputs = np.asarray(self.model.forward())
                     outputs = [outputs[index].reshape(-1) for index in range(len(crops))]
+                elif self.model_kind == "torchreid":
+                    import cv2
+
+                    # Torchreid treats numpy inputs as RGB images; video frames
+                    # arrive from OpenCV as BGR.
+                    outputs = self.model(
+                        [cv2.cvtColor(crop, cv2.COLOR_BGR2RGB) for crop in crops]
+                    )
                 else:
                     outputs = self.model.embed(
                         source=crops,
@@ -246,15 +296,79 @@ class NativeIdentityRefiner:
         *,
         home_team_cluster: str = "B",
         max_gap_seconds: float = 3.0,
+        global_max_gap_seconds: float = 7_200.0,
         reid_model_path: str = "",
+        reid_backend: str = "auto",
+        reid_model_name: str = "osnet_x0_25",
+        jersey_engine: str = "auto",
+        jersey_model_path: str = "",
+        jersey_device: str = "cpu",
+        jersey_interval_frames: int = 12,
+        jersey_minimum_box_height: int = 72,
+        jersey_max_crops_per_frame: int = 4,
+        roster: list[dict] | None = None,
         device: str = "cpu",
     ):
         self.home_team_cluster = (
             "A" if str(home_team_cluster).strip().upper() == "A" else "B"
         )
         self.max_gap_ms = max(500, int(float(max_gap_seconds) * 1_000))
-        self.encoder = NativeAppearanceEncoder(reid_model_path, device)
+        self.global_max_gap_ms = max(
+            self.max_gap_ms,
+            int(float(global_max_gap_seconds) * 1_000),
+        )
+        self.encoder = NativeAppearanceEncoder(
+            reid_model_path,
+            device,
+            backend=reid_backend,
+            model_name=reid_model_name,
+        )
+        self.jersey = JerseyNumberRecognizer(
+            engine=jersey_engine,
+            model_path=jersey_model_path,
+            device=jersey_device,
+            minimum_box_height=jersey_minimum_box_height,
+        )
+        self.jersey_interval_frames = max(1, int(jersey_interval_frames))
+        self.jersey_max_crops_per_frame = max(
+            1, int(jersey_max_crops_per_frame)
+        )
+        self.jersey_cursor = 0
+        self.roster = self._normalize_roster(roster or [])
+        self.roster_by_team_number: dict[tuple[str, int], dict] = {}
+        self.roster_by_number: defaultdict[int, list[dict]] = defaultdict(list)
+        for entry in self.roster:
+            key = (entry["team_key"], entry["shirt_number"])
+            if key not in self.roster_by_team_number:
+                self.roster_by_team_number[key] = entry
+            else:
+                # A duplicated shirt number inside one team must be resolved by a human.
+                self.roster_by_team_number[key] = {}
+            self.roster_by_number[entry["shirt_number"]].append(entry)
         self.reset()
+
+    @staticmethod
+    def _normalize_roster(rows: list[dict]) -> list[dict]:
+        normalized: list[dict] = []
+        for row in rows:
+            try:
+                player_id = int(row.get("id"))
+                shirt_number = int(row.get("shirt_number"))
+            except (TypeError, ValueError):
+                continue
+            team_key = str(row.get("team_key") or "").strip().lower()
+            if team_key not in {"home", "away"} or not 0 <= shirt_number <= 99:
+                continue
+            normalized.append(
+                {
+                    "id": player_id,
+                    "team_key": team_key,
+                    "shirt_number": shirt_number,
+                    "name": str(row.get("name") or player_id),
+                    "position": str(row.get("position") or "").strip().upper(),
+                }
+            )
+        return normalized
 
     def reset(self) -> None:
         self.states: dict[int, IdentityState] = {}
@@ -268,6 +382,15 @@ class NativeIdentityRefiner:
         self.team_centers: np.ndarray | None = None
         self.team_last_fit_observations = 0
         self.team_fits = 0
+        self.window_index = 0
+        self.global_reacquisitions = 0
+        self.roster_resolutions = 0
+
+    def reset_window(self) -> None:
+        """Reset only the online tracker namespace, preserving match identities."""
+
+        self.raw_to_canonical = {}
+        self.window_index += 1
 
     @staticmethod
     def _same_role_family(first: str, second: str) -> bool:
@@ -314,11 +437,45 @@ class NativeIdentityRefiner:
         maximum = 0.85 + 0.80 * max(0.0, gap_ms / 1_000.0)
         return max(0.0, 1.0 - normalized_distance / maximum)
 
-    def _link_candidates(self, objects, features, timestamp_ms: int):
+    @staticmethod
+    def _pitch_similarity(state: IdentityState, obj: TrackedObject, gap_ms: int) -> float | None:
+        if state.last_pitch is None or obj.pitch_x is None or obj.pitch_y is None:
+            return None
+        distance = math.hypot(
+            float(obj.pitch_x) - state.last_pitch[0],
+            float(obj.pitch_y) - state.last_pitch[1],
+        )
+        seconds = max(0.04, gap_ms / 1_000.0)
+        plausible_distance = 4.0 + 11.5 * seconds
+        if distance > plausible_distance:
+            return 0.0
+        return max(0.0, 1.0 - distance / plausible_distance)
+
+    def _team_from_feature(self, feature: np.ndarray | None) -> tuple[str | None, float]:
+        if feature is None or self.team_centers is None:
+            return None, 0.0
+        distances = np.linalg.norm(self.team_centers - feature, axis=1)
+        ranked = np.argsort(distances)
+        margin = float(distances[ranked[1]] - distances[ranked[0]])
+        confidence = max(0.0, min(1.0, margin / 0.35))
+        home_index = 0 if self.home_team_cluster == "A" else 1
+        observed = "home" if int(ranked[0]) == home_index else "away"
+        return observed, confidence
+
+    def _link_candidates(
+        self,
+        objects,
+        features,
+        team_features,
+        jersey_observations,
+        timestamp_ms: int,
+    ):
         assignments: dict[int, tuple[int, float]] = {}
         used_states: set[int] = set()
-        candidates: list[tuple[float, int, int]] = []
-        for index, (obj, feature) in enumerate(zip(objects, features)):
+        candidates: list[tuple[float, int, int, bool]] = []
+        for index, (obj, feature, team_feature, jersey_observation) in enumerate(
+            zip(objects, features, team_features, jersey_observations)
+        ):
             raw_id = str(obj.track_id)
             known_id = self.raw_to_canonical.get(raw_id)
             if known_id in self.states:
@@ -327,28 +484,68 @@ class NativeIdentityRefiner:
                 continue
             for canonical_id, state in self.states.items():
                 gap_ms = timestamp_ms - state.last_timestamp_ms
-                if gap_ms <= 0 or gap_ms > self.max_gap_ms:
+                if gap_ms <= 0 or gap_ms > self.global_max_gap_ms:
                     continue
                 if not self._same_role_family(state.role, obj.role):
                     continue
                 appearance = _cosine(state.appearance, feature)
-                minimum_appearance = 0.72 if self.encoder.backend != "histogram" else 0.90
-                if appearance < minimum_appearance:
+                observed_team, observed_team_confidence = self._team_from_feature(team_feature)
+                if (
+                    state.team_label
+                    and observed_team
+                    and observed_team_confidence >= 0.35
+                    and state.team_label != observed_team
+                ):
                     continue
-                motion = self._motion_similarity(state, obj, gap_ms)
-                if motion <= 0:
+                observed_number = jersey_observation.number if jersey_observation else None
+                if (
+                    state.jersey_number is not None
+                    and observed_number is not None
+                    and jersey_observation.confidence >= 0.55
+                    and state.jersey_number != observed_number
+                ):
                     continue
-                score = 0.72 * appearance + 0.28 * motion
-                minimum_score = 0.74 if self.encoder.backend != "histogram" else 0.88
+                short_gap = gap_ms <= self.max_gap_ms
+                if short_gap:
+                    minimum_appearance = 0.72 if self.encoder.backend != "histogram" else 0.90
+                    if appearance < minimum_appearance:
+                        continue
+                    motion = self._motion_similarity(state, obj, gap_ms)
+                    if motion <= 0:
+                        continue
+                    pitch = self._pitch_similarity(state, obj, gap_ms)
+                    if pitch == 0.0:
+                        continue
+                    if pitch is None:
+                        score = 0.70 * appearance + 0.26 * motion
+                        score += 0.04 * observed_team_confidence
+                    else:
+                        score = 0.58 * appearance + 0.20 * motion
+                        score += 0.14 * pitch + 0.08 * observed_team_confidence
+                    minimum_score = 0.72 if self.encoder.backend != "histogram" else 0.88
+                else:
+                    # Long reacquisition is forbidden with the colour histogram
+                    # fallback. It requires deep appearance plus another cue.
+                    if self.encoder.backend == "histogram" or appearance < 0.82:
+                        continue
+                    secondary_evidence = 0.0
+                    if observed_team and state.team_label == observed_team:
+                        secondary_evidence = max(secondary_evidence, observed_team_confidence)
+                    if observed_number is not None and observed_number == state.jersey_number:
+                        secondary_evidence = max(secondary_evidence, jersey_observation.confidence)
+                    if secondary_evidence < 0.28:
+                        continue
+                    score = 0.82 * appearance + 0.18 * secondary_evidence
+                    minimum_score = 0.82
                 if score >= minimum_score:
-                    candidates.append((score, index, canonical_id))
+                    candidates.append((score, index, canonical_id, not short_gap))
 
-        for score, index, canonical_id in sorted(candidates, reverse=True):
+        for score, index, canonical_id, long_gap in sorted(candidates, reverse=True):
             if index in assignments or canonical_id in used_states:
                 continue
             same_object_scores = [
                 value
-                for value, other_index, other_id in candidates
+                for value, other_index, other_id, _long_gap in candidates
                 if other_index == index and other_id != canonical_id
             ]
             if same_object_scores and score - max(same_object_scores) < 0.035:
@@ -356,6 +553,8 @@ class NativeIdentityRefiner:
             assignments[index] = (canonical_id, score)
             used_states.add(canonical_id)
             self.fragments_stitched += 1
+            if long_gap:
+                self.global_reacquisitions += 1
         return assignments
 
     def _new_state(self, obj, feature, timestamp_ms: int) -> IdentityState:
@@ -364,6 +563,7 @@ class NativeIdentityRefiner:
         state = IdentityState(
             canonical_id=canonical_id,
             role=obj.role,
+            first_timestamp_ms=timestamp_ms,
             last_timestamp_ms=timestamp_ms,
             last_bbox=tuple(obj.bbox_xyxy),
             appearance=feature.copy(),
@@ -371,17 +571,36 @@ class NativeIdentityRefiner:
         self.states[canonical_id] = state
         return state
 
-    def _update_state(self, state, obj, feature, team_feature, timestamp_ms: int) -> None:
-        state.role = obj.role if state.role == str(ObjectRole.PLAYER) else state.role
+    def _update_state(
+        self,
+        state,
+        obj,
+        feature,
+        team_feature,
+        jersey_observation: JerseyObservation | None,
+        timestamp_ms: int,
+    ) -> None:
+        state.role_votes[str(obj.role)] += max(0.05, float(obj.confidence))
+        state.role = state.role_votes.most_common(1)[0][0]
         state.last_timestamp_ms = timestamp_ms
         state.last_bbox = tuple(obj.bbox_xyxy)
+        if obj.pitch_x is not None and obj.pitch_y is not None:
+            state.last_pitch = (float(obj.pitch_x), float(obj.pitch_y))
         state.appearance = (
             feature.copy()
             if state.appearance is None or state.appearance.size != feature.size
             else _normalize(0.88 * state.appearance + 0.12 * feature)
         )
         state.raw_track_ids.add(str(obj.track_id))
+        state.windows_seen.add(self.window_index)
         state.observations += 1
+        if jersey_observation is not None and obj.role in ATHLETE_ROLES:
+            state.jersey_vote.add(
+                jersey_observation.number,
+                jersey_observation.confidence,
+                timestamp_ms,
+            )
+            state.jersey_number, state.jersey_confidence = state.jersey_vote.result()
         if obj.role == str(ObjectRole.PLAYER) and team_feature is not None:
             if state.team_feature_sum is None:
                 state.team_feature_sum = team_feature.astype(np.float32).copy()
@@ -462,6 +681,37 @@ class NativeIdentityRefiner:
                 state.team_label = winner
         return state.team_label, confidence
 
+    def _resolve_roster(self, state: IdentityState) -> None:
+        if state.jersey_number is None:
+            return
+        if (
+            state.roster_player_id is not None
+            and state.roster_resolved_number == state.jersey_number
+            and (
+                state.team_label is None
+                or state.roster_resolved_team == state.team_label
+            )
+        ):
+            return
+        state.roster_player_id = None
+        state.roster_player_name = ""
+        state.roster_resolved_number = None
+        state.roster_resolved_team = None
+        entry = None
+        if state.team_label:
+            entry = self.roster_by_team_number.get((state.team_label, state.jersey_number))
+        elif len(self.roster_by_number[state.jersey_number]) == 1:
+            entry = self.roster_by_number[state.jersey_number][0]
+        if not entry:
+            return
+        state.roster_player_id = int(entry["id"])
+        state.roster_player_name = str(entry["name"])
+        state.roster_resolved_number = int(entry["shirt_number"])
+        state.roster_resolved_team = str(entry["team_key"])
+        if state.team_label is None:
+            state.team_label = str(entry["team_key"])
+        self.roster_resolutions += 1
+
     def process(self, frame, objects: list[TrackedObject], timestamp_ms: int) -> list[TrackedObject]:
         self.frames += 1
         people = [obj for obj in objects if obj.role in PERSON_ROLES]
@@ -477,10 +727,44 @@ class NativeIdentityRefiner:
             else None
             for obj in people
         ]
-        assignments = self._link_candidates(people, features, timestamp_ms)
+        read_jerseys = self.jersey.model is not None and self.frames % self.jersey_interval_frames == 0
+        jersey_observations: list[JerseyObservation | None] = [None] * len(people)
+        if read_jerseys:
+            eligible = [
+                index
+                for index, obj in enumerate(people)
+                if obj.role in ATHLETE_ROLES
+                and _box_height(obj.bbox_xyxy)
+                >= int(getattr(self.jersey, "minimum_box_height", 24))
+                and (
+                    self.raw_to_canonical.get(str(obj.track_id)) not in self.states
+                    or self.states[self.raw_to_canonical[str(obj.track_id)]].jersey_number
+                    is None
+                )
+            ]
+            # Rotate a left-to-right list so one close foreground player cannot
+            # consume the OCR budget on every frame.
+            eligible.sort(key=lambda index: _bottom_center(people[index].bbox_xyxy)[0])
+            if eligible:
+                start = self.jersey_cursor % len(eligible)
+                ordered = eligible[start:] + eligible[:start]
+                selected = ordered[: self.jersey_max_crops_per_frame]
+                self.jersey_cursor = (start + len(selected)) % len(eligible)
+                for index in selected:
+                    jersey_observations[index] = self.jersey.recognize(
+                        frame,
+                        people[index].bbox_xyxy,
+                    )
+        assignments = self._link_candidates(
+            people,
+            features,
+            team_features,
+            jersey_observations,
+            timestamp_ms,
+        )
         state_by_index = {}
-        for index, (obj, feature, team_feature) in enumerate(
-            zip(people, features, team_features)
+        for index, (obj, feature, team_feature, jersey_observation) in enumerate(
+            zip(people, features, team_features, jersey_observations)
         ):
             raw_id = str(obj.track_id)
             self.raw_tracks_seen.add(raw_id)
@@ -492,26 +776,41 @@ class NativeIdentityRefiner:
                 state = self.states[assignment[0]]
                 reid_confidence = float(assignment[1])
             self.raw_to_canonical[raw_id] = state.canonical_id
-            self._update_state(state, obj, feature, team_feature, timestamp_ms)
+            self._update_state(
+                state,
+                obj,
+                feature,
+                team_feature,
+                jersey_observation,
+                timestamp_ms,
+            )
             state_by_index[index] = (state, reid_confidence)
 
         self._fit_team_clusters()
         for index, obj in enumerate(people):
             state, reid_confidence = state_by_index[index]
             team_label, team_confidence = self._team_for_state(state)
-            if obj.role == str(ObjectRole.PLAYER):
+            self._resolve_roster(state)
+            if obj.role in ATHLETE_ROLES:
                 obj.team_key = team_label
             elif obj.role == str(ObjectRole.REFEREE):
                 obj.team_key = None
             obj.track_id = f"native-{state.canonical_id}"
             obj.player_key = obj.track_id if obj.role in ATHLETE_ROLES else None
+            obj.shirt_number = state.jersey_number
             obj.metadata.update(
                 {
                     "identity_engine": "native_gsr",
+                    "identity_scope": "match",
                     "source_track_ids": sorted(state.raw_track_ids),
                     "reid_backend": self.encoder.backend,
                     "reid_confidence": round(reid_confidence, 4),
                     "team_confidence": round(team_confidence, 4),
+                    "jersey_backend": self.jersey.backend,
+                    "jersey_confidence": round(state.jersey_confidence, 4),
+                    "roster_player_id": state.roster_player_id,
+                    "roster_player_name": state.roster_player_name,
+                    "identity_windows": len(state.windows_seen),
                 }
             )
         return [*people, *passthrough]
@@ -528,16 +827,27 @@ class NativeIdentityRefiner:
             "status": "ready" if self.team_centers is not None else "collecting",
             "appearance_backend": self.encoder.backend,
             "appearance_error": self.encoder.error,
+            "deep_reid_ready": self.encoder.model is not None,
             "frames": self.frames,
+            "windows": self.window_index,
             "raw_tracks": len(self.raw_tracks_seen),
             "canonical_tracks": len(self.states),
             "fragments_stitched": self.fragments_stitched,
+            "global_reacquisitions": self.global_reacquisitions,
             "duplicates_removed": self.duplicates_removed,
             "team_tracklets": sum(
                 state.mean_team_feature is not None for state in self.states.values()
             ),
             "team_observations": self.team_observations,
             "team_fits": self.team_fits,
+            "jersey": self.jersey.diagnostics(),
+            "jersey_interval_frames": self.jersey_interval_frames,
+            "jersey_max_crops_per_frame": self.jersey_max_crops_per_frame,
+            "jersey_tracklets": sum(
+                state.jersey_number is not None for state in self.states.values()
+            ),
+            "roster_entries": len(self.roster),
+            "roster_resolutions": self.roster_resolutions,
             "mapping_margin": round(distance, 4),
             "home_group": self.home_team_cluster,
             "away_group": "B" if self.home_team_cluster == "A" else "A",

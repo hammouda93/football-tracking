@@ -36,6 +36,10 @@ class YoloVisionProvider(VisionProvider):
         profile: str = "main_py",
         confidence: float = 0.3,
         ball_confidence: float = 0.12,
+        ball_tiled_recovery: bool = False,
+        ball_recovery_interval_frames: int = 12,
+        ball_recovery_image_size: int = 960,
+        ball_recovery_overlap: float = 0.15,
         image_size: int = 1280,
         tracking_fps: float = 10.0,
         tracker_name: str = "bytetrack",
@@ -97,6 +101,14 @@ class YoloVisionProvider(VisionProvider):
             0.01,
             min(float(ball_confidence), float(confidence)),
         )
+        self.ball_tiled_recovery = bool(ball_tiled_recovery)
+        self.ball_recovery_interval_frames = max(
+            1, int(ball_recovery_interval_frames)
+        )
+        self.ball_recovery_image_size = max(320, int(ball_recovery_image_size))
+        self.ball_recovery_overlap = max(
+            0.0, min(0.35, float(ball_recovery_overlap))
+        )
         self.tracker_new_confidence = max(
             self.tracker_low_confidence, float(tracker_new_confidence)
         )
@@ -114,6 +126,7 @@ class YoloVisionProvider(VisionProvider):
         self._register_class_ids(goalkeeper_class_ids, ObjectRole.GOALKEEPER)
         self._register_class_ids(referee_class_ids, ObjectRole.REFEREE)
         self._register_class_ids(ball_class_ids, ObjectRole.BALL)
+        self.ball_class_ids = sorted(int(value) for value in (ball_class_ids or []))
         self.inference_class_ids = (
             sorted({int(value) for value in inference_class_ids})
             if inference_class_ids is not None
@@ -135,6 +148,12 @@ class YoloVisionProvider(VisionProvider):
         self.previous_gray = None
         self.previous_ball_center: tuple[float, float] | None = None
         self.previous_ball_timestamp_ms: int | None = None
+        self.ball_recovery_frames = 0
+        self.ball_recovery_inferences = 0
+        self.ball_recovery_candidates = 0
+        self.ball_recovery_selections = 0
+        self.ball_recovery_error = ""
+        self.frame_index = 0
         self.team_votes: dict[int, Counter[str]] = {}
         self.tracker = self._build_tracker()
         self.official_tracker = self._build_tracker()
@@ -209,6 +228,7 @@ class YoloVisionProvider(VisionProvider):
         self.previous_gray = None
         self.previous_ball_center = None
         self.previous_ball_timestamp_ms = None
+        self.frame_index = 0
         self.team_votes = {}
         for attribute in ("tracker", "official_tracker"):
             tracker = getattr(self, attribute)
@@ -222,6 +242,7 @@ class YoloVisionProvider(VisionProvider):
         import supervision as sv
 
         height, width = frame.shape[:2]
+        self.frame_index += 1
         inference_confidence = min(
             self.tracker_low_confidence,
             self.ball_confidence,
@@ -353,8 +374,8 @@ class YoloVisionProvider(VisionProvider):
         if self.profile != "main_py":
             objects = self._deduplicate_tracked_objects(objects)
 
+        ball_candidates = []
         if len(detections):
-            ball_candidates = []
             for xyxy, confidence, class_id in zip(
                 detections.xyxy,
                 detections.confidence,
@@ -366,6 +387,30 @@ class YoloVisionProvider(VisionProvider):
                 ):
                     continue
                 ball_candidates.append((xyxy, confidence))
+        recovery_candidates = []
+        last_ball_age_ms = (
+            timestamp_ms - self.previous_ball_timestamp_ms
+            if self.previous_ball_timestamp_ms is not None
+            else None
+        )
+        regular_geometry_found = any(
+            self._valid_ball_geometry(candidate[0], frame.shape)
+            for candidate in ball_candidates
+        )
+        recovery_due = (
+            self.ball_tiled_recovery
+            and self.ball_class_ids
+            and self.frame_index % self.ball_recovery_interval_frames == 1
+            and (
+                not regular_geometry_found
+                or last_ball_age_ms is None
+                or last_ball_age_ms > 500
+            )
+        )
+        if recovery_due:
+            recovery_candidates = self._recover_ball_candidates(frame)
+            ball_candidates.extend(recovery_candidates)
+        if ball_candidates:
             selected_ball = self._select_ball(
                 ball_candidates,
                 objects,
@@ -383,8 +428,20 @@ class YoloVisionProvider(VisionProvider):
                         confidence=float(confidence),
                         image_x=((x1 + x2) / 2.0) / max(width, 1),
                         image_y=((y1 + y2) / 2.0) / max(height, 1),
+                        metadata={
+                            "ball_engine": (
+                                "yolo_multiscale"
+                                if recovery_candidates
+                                else "yolo_full_frame"
+                            )
+                        },
                     )
                 )
+                if recovery_candidates and any(
+                    self._box_iou(xyxy, candidate[0]) >= 0.90
+                    for candidate in recovery_candidates
+                ):
+                    self.ball_recovery_selections += 1
 
         field_score, scene_cut = self._field_and_cut(frame)
         return FrameAnalysis(
@@ -408,7 +465,8 @@ class YoloVisionProvider(VisionProvider):
                 "raw_ball_detections": sum(
                     role == ObjectRole.BALL and confidence >= self.ball_confidence
                     for role, confidence in zip(roles, confidences)
-                ),
+                )
+                + len(recovery_candidates),
                 "raw_other_detections": sum(
                     role == ObjectRole.OTHER and confidence >= self.confidence
                     for role, confidence in zip(roles, confidences)
@@ -463,6 +521,16 @@ class YoloVisionProvider(VisionProvider):
                 "image_size": self.image_size,
                 "detector_confidence": self.confidence,
                 "ball_confidence": self.ball_confidence,
+                "ball_recovery": {
+                    "enabled": self.ball_tiled_recovery,
+                    "interval_frames": self.ball_recovery_interval_frames,
+                    "image_size": self.ball_recovery_image_size,
+                    "frames": self.ball_recovery_frames,
+                    "inferences": self.ball_recovery_inferences,
+                    "candidates": self.ball_recovery_candidates,
+                    "selections": self.ball_recovery_selections,
+                    "last_error": self.ball_recovery_error,
+                },
                 "team_calibration": self.team_calibration_diagnostics(),
             },
         )
@@ -554,16 +622,7 @@ class YoloVisionProvider(VisionProvider):
         ranked = []
         for box, confidence in candidates:
             x1, y1, x2, y2 = [float(value) for value in box]
-            width = max(0.0, x2 - x1)
-            height = max(0.0, y2 - y1)
-            if (
-                width < 1.0
-                or height < 1.0
-                or width > frame_width * 0.025
-                or height > frame_height * 0.040
-                or width / height < 0.45
-                or width / height > 2.20
-            ):
+            if not self._valid_ball_geometry(box, frame_shape):
                 continue
             center = ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
             near_player = False
@@ -575,7 +634,9 @@ class YoloVisionProvider(VisionProvider):
                 distance = math.hypot(
                     center[0] - player_point[0], center[1] - player_point[1]
                 )
-                limit = max(85.0, player_height * 3.5)
+                # The old 3.5-height radius reached several hundred pixels for
+                # close players and admitted logos/field marks as the ball.
+                limit = max(60.0, min(165.0, player_height * 2.15))
                 if distance <= limit:
                     near_player = True
                     proximity_bonus = max(proximity_bonus, 0.45 * (1.0 - distance / limit))
@@ -607,6 +668,99 @@ class YoloVisionProvider(VisionProvider):
         self.previous_ball_center = center
         self.previous_ball_timestamp_ms = timestamp_ms
         return box, confidence
+
+    @staticmethod
+    def _valid_ball_geometry(box, frame_shape) -> bool:
+        frame_height, frame_width = frame_shape[:2]
+        try:
+            x1, y1, x2, y2 = [float(value) for value in box]
+        except (TypeError, ValueError):
+            return False
+        width = max(0.0, x2 - x1)
+        height = max(0.0, y2 - y1)
+        return bool(
+            width >= 1.0
+            and height >= 1.0
+            and width <= frame_width * 0.018
+            and height <= frame_height * 0.032
+            and 0.45 <= width / max(height, 1e-9) <= 2.20
+        )
+
+    def _recover_ball_candidates(self, frame):
+        """Run a sparse tiled ball-only pass when the full frame loses the ball.
+
+        The four crops approximately double the apparent ball diameter without
+        forcing every person frame through a larger YOLO tensor. Recovery is
+        deliberately sparse because the target Windows GPU has 4 GB of VRAM.
+        """
+
+        height, width = frame.shape[:2]
+        overlap_x = int(round(width * self.ball_recovery_overlap / 2.0))
+        overlap_y = int(round(height * self.ball_recovery_overlap / 2.0))
+        middle_x, middle_y = width // 2, height // 2
+        tiles = [
+            (0, 0, min(width, middle_x + overlap_x), min(height, middle_y + overlap_y)),
+            (max(0, middle_x - overlap_x), 0, width, min(height, middle_y + overlap_y)),
+            (0, max(0, middle_y - overlap_y), min(width, middle_x + overlap_x), height),
+            (max(0, middle_x - overlap_x), max(0, middle_y - overlap_y), width, height),
+        ]
+        candidates = []
+        self.ball_recovery_frames += 1
+        try:
+            for left, top, right, bottom in tiles:
+                crop = frame[top:bottom, left:right]
+                if crop.size == 0:
+                    continue
+                self.ball_recovery_inferences += 1
+                prediction = self.model.predict(
+                    source=crop,
+                    conf=self.ball_confidence,
+                    imgsz=self.ball_recovery_image_size,
+                    device=self.device,
+                    classes=self.ball_class_ids,
+                    max_det=24,
+                    verbose=False,
+                )[0]
+                if not len(prediction.boxes):
+                    continue
+                boxes = prediction.boxes.xyxy.detach().cpu().numpy()
+                confidences = prediction.boxes.conf.detach().cpu().numpy()
+                for box, confidence in zip(boxes, confidences):
+                    translated = np.asarray(
+                        [
+                            float(box[0]) + left,
+                            float(box[1]) + top,
+                            float(box[2]) + left,
+                            float(box[3]) + top,
+                        ],
+                        dtype=np.float32,
+                    )
+                    if self._valid_ball_geometry(translated, frame.shape):
+                        candidates.append((translated, float(confidence)))
+        except Exception as exc:  # pragma: no cover - optional GPU recovery path
+            self.ball_recovery_error = str(exc)
+            # A failing extra pass must not lose otherwise valid player results.
+            self.ball_tiled_recovery = False
+            return []
+        deduplicated = []
+        for candidate in sorted(candidates, key=lambda item: item[1], reverse=True):
+            if any(self._box_iou(candidate[0], kept[0]) >= 0.55 for kept in deduplicated):
+                continue
+            deduplicated.append(candidate)
+        self.ball_recovery_candidates += len(deduplicated)
+        return deduplicated
+
+    def ball_recovery_diagnostics(self) -> dict:
+        return {
+            "enabled": self.ball_tiled_recovery,
+            "interval_frames": self.ball_recovery_interval_frames,
+            "image_size": self.ball_recovery_image_size,
+            "frames": self.ball_recovery_frames,
+            "inferences": self.ball_recovery_inferences,
+            "candidates": self.ball_recovery_candidates,
+            "selections": self.ball_recovery_selections,
+            "last_error": self.ball_recovery_error,
+        }
 
     def _stabilize_team(self, tracker_id: int, observed_team: str | None) -> str | None:
         votes = self.team_votes.setdefault(int(tracker_id), Counter())

@@ -22,6 +22,27 @@ correspond au modèle utilisé par l'ancien prototype : `0=ballon`, `2=joueur`,
 Le test rapide affiche désormais ces classes et sépare le nombre de détections YOLO
 du nombre de joueurs effectivement conservés par le tracker.
 
+## Modèles Native GSR
+
+Le script Windows place automatiquement le modèle Re-ID ici :
+
+```text
+models/native-gsr/osnet_x0_25_msmt17.pth
+```
+
+Pour la calibration, ajoutez seulement un couple provenant de la même version
+du même modèle :
+
+```text
+models/native-gsr/pitch_keypoints.onnx
+models/native-gsr/pitch_keypoints.schema.json
+```
+
+Le JSON doit contenir `landmarks`, exactement 97 entrées indexées avec
+`pitch_xy: [x_m, y_m]`, et peut décrire sous `model` la taille d'entrée,
+`mean`, `std` et `output_name`. Il est dangereux de réutiliser le schéma d'un
+autre checkpoint : l'ordre sémantique des sorties fait partie du modèle.
+
 ## Tracker recommandé pour une caméra TV
 
 `YOLO_TRACKER=botsort` est le mode par défaut. Contrairement à ByteTrack, BoT-SORT
