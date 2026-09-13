@@ -34,8 +34,10 @@ from .ball_in_play import BallInPlayEngine
 from .camera import CameraStabilizer, PitchProjector
 from .clips import ClipPlanner, render_clip
 from .events import EventEngine
+from .gsr import ExternalGSRExecutor, GSR_ENGINE_PROFILES
 from .periods import PeriodDetector
 from .providers.base import build_provider
+from .providers.gsr import ExternalGSRVisionProvider
 from .quality import VideoQualityAnalyzer
 from .stats import StatsAggregator, blank_metrics
 from .types import EventCandidate, FrameAnalysis, ObjectRole, PossessionSample, PossessionSpan
@@ -137,6 +139,8 @@ class MatchAnalysisRunner:
         return {
             "analysis_mode": self.analysis_mode,
             "backend": str(self.config.get("backend", "heuristic")),
+            "athlete_engine": str(self.config.get("athlete_engine", "legacy")),
+            "gsr": {},
             "tracking_fps": 0.0,
             "samples": [],
             "spans": [],
@@ -285,26 +289,44 @@ class MatchAnalysisRunner:
     def _track(self, periods: list[MatchPeriod], metadata) -> dict:
         self._stage(AnalysisRun.Stage.TRACKING, 22)
         backend = str(self.config.get("backend", "heuristic"))
+        athlete_engine = str(self.config.get("athlete_engine", "legacy")).strip().lower()
+        if athlete_engine not in {"legacy", *GSR_ENGINE_PROFILES}:
+            raise ValueError(f"Moteur de suivi des athlètes inconnu : {athlete_engine}")
         device = str(self.config.get("device", "cpu"))
         requested_tracking_fps = max(
             0.5, float(self.config.get("tracking_fps", 10.0))
         )
+        fps_backend = (
+            "yolo"
+            if backend == "yolo"
+            or (
+                athlete_engine != "legacy"
+                and str(self.config.get("gsr_ball_backend", "yolo")).lower() == "yolo"
+            )
+            else backend
+        )
         tracking_fps = self._effective_tracking_fps(
-            backend=backend,
+            backend=fps_backend,
             requested_fps=requested_tracking_fps,
             native_fps=float(metadata.fps or 0.0),
             minimum_yolo_fps=float(
                 self.config.get("min_yolo_tracking_fps", 8.0)
             ),
         )
+        athlete_tracking_fps = (
+            tracking_fps
+            if athlete_engine == "legacy"
+            else max(1.0, float(self.config.get("gsr_tracking_fps", 5.0)))
+        )
         windows = self._tracking_windows(periods)
         tracking_duration = sum(window["end_ms"] - window["start_ms"] for window in windows)
         estimated_frames = math.ceil(tracking_duration / 1000.0 * tracking_fps)
         operation = (
-            "Référence main.py"
+            "Test court"
             if self.analysis_mode == "reference"
             else ("Test rapide" if self.analysis_mode == "sample" else "Tracking")
         )
+        progress_backend = backend if athlete_engine == "legacy" else athlete_engine
         self._save_live_progress(
             22,
             {
@@ -318,11 +340,12 @@ class MatchAnalysisRunner:
                 "eta_seconds": None,
                 "speed_x": 0.0,
                 "backend": backend,
+                "athlete_engine": athlete_engine,
                 "device": device,
                 "tracking_fps": tracking_fps,
                 "requested_tracking_fps": requested_tracking_fps,
                 "label": self._tracking_label(
-                    backend=backend,
+                    backend=progress_backend,
                     device=device,
                     stage_progress=0.0,
                     processed_ms=0,
@@ -336,35 +359,12 @@ class MatchAnalysisRunner:
                 ),
             },
         )
-        provider = build_provider(
-            backend,
-            model_path=self.config.get("yolo_model_path", ""),
-            device=device,
-            profile=str(self.config.get("yolo_profile", "main_py")),
-            confidence=float(self.config.get("yolo_confidence", 0.30)),
-            ball_confidence=float(self.config.get("yolo_ball_confidence", 0.12)),
-            image_size=int(self.config.get("yolo_image_size", 1280)),
-            tracking_fps=tracking_fps,
-            tracker_name=str(self.config.get("yolo_tracker", "bytetrack")),
-            tracker_low_confidence=float(
-                self.config.get("yolo_track_low_confidence", 0.10)
-            ),
-            tracker_new_confidence=float(
-                self.config.get("yolo_new_track_confidence", 0.25)
-            ),
-            tracker_match_threshold=float(
-                self.config.get("yolo_track_match_threshold", 0.80)
-            ),
-            tracker_buffer_seconds=float(
-                self.config.get("yolo_track_buffer_seconds", 5.0)
-            ),
-            player_class_ids=self.config.get("yolo_player_class_ids", []),
-            goalkeeper_class_ids=self.config.get("yolo_goalkeeper_class_ids", []),
-            referee_class_ids=self.config.get("yolo_referee_class_ids", []),
-            ball_class_ids=self.config.get("yolo_ball_class_ids", []),
-            home_team_cluster=str(self.config.get("home_team_cluster", "B")),
+        provider = (
+            self._build_legacy_provider(backend, device, tracking_fps)
+            if athlete_engine == "legacy"
+            else None
         )
-        tracking_started_at = time.monotonic()
+        gsr_audit: dict[str, Any] = {}
         last_live_update = 0.0
         frames_processed = 0
         processed_ms = 0
@@ -396,13 +396,28 @@ class MatchAnalysisRunner:
         native_live_enabled = (
             bool(self.config.get("live_window", False))
             and self.analysis_mode in {"reference", "sample"}
-            and backend == "yolo"
+            and (backend == "yolo" or athlete_engine != "legacy")
         )
         native_live_requested = native_live_enabled
         self._live_track_history: dict[str, list[tuple[int, int]]] = {}
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
             temp_path = Path(temp_dir)
+            if provider is None:
+                provider, gsr_audit = self._build_external_gsr_provider(
+                    athlete_engine=athlete_engine,
+                    backend=backend,
+                    device=device,
+                    tracking_fps=tracking_fps,
+                    athlete_tracking_fps=athlete_tracking_fps,
+                    windows=windows,
+                    work_dir=temp_path,
+                    live_preview_path=live_preview_path,
+                    tracking_duration_ms=tracking_duration,
+                    estimated_frames=estimated_frames,
+                    operation=operation,
+                )
+            tracking_started_at = time.monotonic()
             tracking_path = Path(temp_dir) / "tracking.ndjson"
             with tracking_path.open("w", encoding="utf-8") as tracking_file:
                 for window in windows:
@@ -471,6 +486,9 @@ class MatchAnalysisRunner:
                         period_samples.append(sample)
                         all_samples.append((period, sample))
                         diagnostic_counts["frames"] += 1
+                        diagnostic_counts["gsr_missing_frames"] += int(
+                            bool(analysis.diagnostics.get("gsr_frame_missing", False))
+                        )
                         diagnostic_counts["athlete_observations"] += len(analysis.athletes)
                         raw_athletes = int(
                             analysis.diagnostics.get(
@@ -572,7 +590,9 @@ class MatchAnalysisRunner:
                         current_processed = max(0, min(tracking_duration, current_processed))
                         now = time.monotonic()
                         progress_ratio = current_processed / max(tracking_duration, 1)
-                        percent = min(68, 22 + int(46 * progress_ratio))
+                        progress_floor = 60 if athlete_engine != "legacy" else 22
+                        progress_span = 8 if athlete_engine != "legacy" else 46
+                        percent = min(68, progress_floor + int(progress_span * progress_ratio))
                         if now - last_live_update >= 2.0 or percent != self.last_progress:
                             elapsed_seconds = max(0.001, now - tracking_started_at)
                             processed_seconds = current_processed / 1000.0
@@ -595,12 +615,13 @@ class MatchAnalysisRunner:
                                 "eta_seconds": round(eta_seconds) if eta_seconds is not None else None,
                                 "speed_x": round(speed_x, 3),
                                 "backend": backend,
+                                "athlete_engine": athlete_engine,
                                 "device": device,
                                 "tracking_fps": tracking_fps,
                                 "requested_tracking_fps": requested_tracking_fps,
                             }
                             detail["label"] = self._tracking_label(
-                                backend=backend,
+                                backend=progress_backend,
                                 device=device,
                                 stage_progress=detail["stage_progress"],
                                 processed_ms=current_processed,
@@ -632,6 +653,8 @@ class MatchAnalysisRunner:
                 tracking_path,
                 metadata={
                     "backend": backend,
+                    "athlete_engine": athlete_engine,
+                    "gsr": gsr_audit,
                     "tracking_fps": tracking_fps,
                     "requested_tracking_fps": requested_tracking_fps,
                     "coordinate_systems": ["image_normalized", "pitch_meters"],
@@ -680,9 +703,30 @@ class MatchAnalysisRunner:
                 else {}
             ),
         )
+        diagnostics["athlete_engine"] = athlete_engine
+        diagnostics["gsr"] = {
+            key: value
+            for key, value in gsr_audit.items()
+            if key != "manifest"
+        }
+        diagnostics["gsr_missing_frames"] = int(
+            diagnostic_counts["gsr_missing_frames"]
+        )
+        if athlete_engine != "legacy":
+            missing_ratio = diagnostic_counts["gsr_missing_frames"] / max(
+                diagnostic_counts["frames"], 1
+            )
+            if missing_ratio > 0.05:
+                diagnostics["issues"].insert(
+                    0,
+                    "Le résultat GSR ne couvre pas au moins 95 % des images demandées.",
+                )
+                diagnostics["verdict"] = "fail"
         return {
             "analysis_mode": self.analysis_mode,
             "backend": backend,
+            "athlete_engine": athlete_engine,
+            "gsr": gsr_audit,
             "tracking_fps": tracking_fps,
             "requested_tracking_fps": requested_tracking_fps,
             "samples": all_samples,
@@ -694,6 +738,173 @@ class MatchAnalysisRunner:
             "diagnostics": diagnostics,
             "previews": preview_artifacts,
         }
+
+    def _build_legacy_provider(
+        self,
+        backend: str,
+        device: str,
+        tracking_fps: float,
+        *,
+        ball_only: bool = False,
+    ):
+        ball_class_ids = self.config.get("yolo_ball_class_ids", [])
+        return build_provider(
+            backend,
+            model_path=self.config.get("yolo_model_path", ""),
+            device=device,
+            profile=str(self.config.get("yolo_profile", "main_py")),
+            confidence=float(self.config.get("yolo_confidence", 0.30)),
+            ball_confidence=float(self.config.get("yolo_ball_confidence", 0.12)),
+            image_size=int(self.config.get("yolo_image_size", 1280)),
+            tracking_fps=tracking_fps,
+            tracker_name=str(self.config.get("yolo_tracker", "bytetrack")),
+            tracker_low_confidence=float(
+                self.config.get("yolo_track_low_confidence", 0.10)
+            ),
+            tracker_new_confidence=float(
+                self.config.get("yolo_new_track_confidence", 0.25)
+            ),
+            tracker_match_threshold=float(
+                self.config.get("yolo_track_match_threshold", 0.80)
+            ),
+            tracker_buffer_seconds=float(
+                self.config.get("yolo_track_buffer_seconds", 5.0)
+            ),
+            player_class_ids=(
+                [] if ball_only else self.config.get("yolo_player_class_ids", [])
+            ),
+            goalkeeper_class_ids=(
+                [] if ball_only else self.config.get("yolo_goalkeeper_class_ids", [])
+            ),
+            referee_class_ids=(
+                [] if ball_only else self.config.get("yolo_referee_class_ids", [])
+            ),
+            ball_class_ids=ball_class_ids,
+            inference_class_ids=ball_class_ids if ball_only and backend == "yolo" else None,
+            home_team_cluster=str(self.config.get("home_team_cluster", "B")),
+        )
+
+    def _build_external_gsr_provider(
+        self,
+        *,
+        athlete_engine: str,
+        backend: str,
+        device: str,
+        tracking_fps: float,
+        athlete_tracking_fps: float,
+        windows: list[dict],
+        work_dir: Path,
+        live_preview_path: Path,
+        tracking_duration_ms: int,
+        estimated_frames: int,
+        operation: str,
+    ) -> tuple[ExternalGSRVisionProvider, dict]:
+        executor = ExternalGSRExecutor(
+            engine=athlete_engine,
+            command=list(self.config.get("gsr_runner_command") or []),
+            timeout_seconds=int(self.config.get("gsr_timeout_seconds", 43_200)),
+            frame_tolerance_ms=int(self.config.get("gsr_frame_tolerance_ms", 120)),
+            home_team_cluster=str(self.config.get("home_team_cluster", "B")),
+        )
+
+        def external_progress(payload: dict[str, Any]) -> None:
+            try:
+                stage_progress = max(0.0, min(100.0, float(payload.get("progress", 0.0))))
+            except (TypeError, ValueError):
+                stage_progress = 0.0
+            progress = min(59, 22 + int(37 * stage_progress / 100.0))
+            elapsed = max(0.0, float(payload.get("elapsed_seconds", 0.0) or 0.0))
+            eta = payload.get("eta_seconds")
+            try:
+                eta = float(eta) if eta is not None else None
+            except (TypeError, ValueError):
+                eta = None
+            processed_video_ms = max(
+                0,
+                min(
+                    tracking_duration_ms,
+                    int(payload.get("processed_video_ms", 0) or 0),
+                ),
+            )
+            detail = {
+                "stage": "external_gsr",
+                "stage_progress": round(stage_progress, 2),
+                "processed_video_ms": processed_video_ms,
+                "total_video_ms": tracking_duration_ms,
+                "frames_processed": int(payload.get("frames_processed", 0) or 0),
+                "frames_total_estimate": estimated_frames,
+                "elapsed_seconds": round(elapsed, 1),
+                "eta_seconds": round(eta) if eta is not None else None,
+                "speed_x": float(payload.get("speed_x", 0.0) or 0.0),
+                "backend": backend,
+                "athlete_engine": athlete_engine,
+                "device": device,
+                "tracking_fps": tracking_fps,
+                "label": str(payload.get("label") or "").strip()
+                or self._tracking_label(
+                    backend=athlete_engine,
+                    device=device,
+                    stage_progress=stage_progress,
+                    processed_ms=processed_video_ms,
+                    total_ms=tracking_duration_ms,
+                    frames_processed=int(payload.get("frames_processed", 0) or 0),
+                    frames_total=estimated_frames,
+                    speed_x=float(payload.get("speed_x", 0.0) or 0.0),
+                    eta_seconds=eta,
+                    operation=operation,
+                ),
+            }
+            self._save_live_progress(progress, detail)
+
+        store, audit = executor.prepare(
+            work_dir=work_dir,
+            video_path=self.video.file.path,
+            run_id=str(self.run.pk),
+            match_id=str(self.match.pk),
+            windows=windows,
+            tracking_fps=athlete_tracking_fps,
+            precomputed_result=str(self.config.get("gsr_precomputed_result", "")),
+            progress_callback=external_progress,
+            cancel_callback=self._check_cancelled,
+            live_preview_path=live_preview_path,
+        )
+        ball_backend = str(self.config.get("gsr_ball_backend", "yolo")).strip().lower()
+        ball_provider = (
+            None
+            if ball_backend == "none"
+            else self._build_legacy_provider(
+                ball_backend,
+                device,
+                tracking_fps,
+                ball_only=True,
+            )
+        )
+        result_fps = max(0.1, float(store.fps or athlete_tracking_fps))
+        effective_tolerance_ms = max(
+            int(self.config.get("gsr_frame_tolerance_ms", 120)),
+            math.ceil(500.0 / result_fps) + 5,
+        )
+        provider = ExternalGSRVisionProvider(
+            store,
+            tolerance_ms=effective_tolerance_ms,
+            ball_provider=ball_provider,
+        )
+        audit["ball_backend"] = ball_backend
+        audit["requested_athlete_tracking_fps"] = athlete_tracking_fps
+        audit["athlete_tracking_fps"] = result_fps
+        audit["frame_tolerance_ms"] = effective_tolerance_ms
+        _save_json_artifact(
+            self.run,
+            AnalysisArtifact.Kind.TRACKING,
+            f"gsr-audit-{self.run.pk}.json",
+            audit,
+            metadata={
+                "artifact_type": "gsr_audit",
+                "schema": audit["schema"],
+                "engine": athlete_engine,
+            },
+        )
+        return provider, audit
 
     def _show_live_tracking(
         self,
@@ -746,22 +957,27 @@ class MatchAnalysisRunner:
         for obj in analysis.objects:
             x1, y1, x2, y2 = (int(value) for value in obj.bbox_xyxy)
             track_number = obj.track_id.rsplit("-", 1)[-1]
+            identity = (
+                f"N{obj.shirt_number} ID {track_number}"
+                if obj.shirt_number is not None
+                else f"ID {track_number}"
+            )
             if obj.role == ObjectRole.BALL:
                 color = final_colors["ball"]
                 label = "BALLON"
                 thickness = 3
             elif obj.role == ObjectRole.GOALKEEPER:
                 color = final_colors["goalkeeper"]
-                label = f"GB #{track_number}"
+                label = f"GB {identity}"
                 thickness = 2
             elif obj.role == ObjectRole.REFEREE:
                 color = final_colors["referee"]
-                label = f"ARBITRE/JUGE #{track_number}"
+                label = f"ARBITRE/JUGE {identity}"
                 thickness = 2
             else:
                 color = final_colors.get(obj.team_key or "unknown", final_colors["unknown"])
                 team_label = team_labels.get(obj.team_key or "", "EQUIPE ?")
-                label = f"J {team_label} #{track_number}"
+                label = f"J {team_label} {identity}"
                 thickness = 2
 
             cv2.rectangle(preview, (x1, y1), (x2, y2), color, thickness)
@@ -889,10 +1105,10 @@ class MatchAnalysisRunner:
             "ball": (255, 0, 255),
         }
         raw_labels = {
-            "player": "YOLO J",
-            "goalkeeper": "YOLO GB",
-            "referee": "YOLO ARB",
-            "ball": "YOLO BALLON",
+            "player": "SOURCE J",
+            "goalkeeper": "SOURCE GB",
+            "referee": "SOURCE ARB",
+            "ball": "SOURCE BALLON",
         }
         for detection in analysis.diagnostics.get("raw_detections", []):
             x1, y1, x2, y2 = (int(value) for value in detection["bbox"])
@@ -931,15 +1147,20 @@ class MatchAnalysisRunner:
                 color = colors.get(obj.team_key or "unknown", colors["unknown"])
             cv2.rectangle(preview, (x1, y1), (x2, y2), color, 3 if is_ball else 2)
             track_number = obj.track_id.rsplit("-", 1)[-1]
+            identity = (
+                f"N{obj.shirt_number} ID {track_number}"
+                if obj.shirt_number is not None
+                else f"ID {track_number}"
+            )
             if is_ball:
                 label = "BALLON"
             elif obj.role == ObjectRole.GOALKEEPER:
-                label = f"GB #{track_number}"
+                label = f"GB {identity}"
             elif obj.role == ObjectRole.REFEREE:
-                label = f"ARBITRE/JUGE #{track_number}"
+                label = f"ARBITRE/JUGE {identity}"
             else:
                 team_label = (team_labels or {}).get(obj.team_key or "", "EQUIPE ?")
-                label = f"J {team_label} #{track_number}"
+                label = f"J {team_label} {identity}"
             cv2.putText(
                 preview,
                 label,
@@ -953,7 +1174,7 @@ class MatchAnalysisRunner:
         cv2.rectangle(raw_preview, (8, 8), (760, 58), (20, 20, 20), -1)
         cv2.putText(
             raw_preview,
-            "A. YOLO BRUT - AVANT TRACKER ET FILTRES",
+            "A. SORTIE SOURCE - AVANT NORMALISATION DJANGO",
             (18, 27),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.44,
@@ -963,7 +1184,7 @@ class MatchAnalysisRunner:
         )
         cv2.putText(
             raw_preview,
-            "JAUNE=JOUEUR | BLEU=GB | CYAN=ARBITRE | MAGENTA=BALLON",
+            "JAUNE=JOUEUR | BLEU=GB | CYAN=ARBITRE | MAGENTA=BALLON LOCAL",
             (18, 48),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.40,
@@ -1029,22 +1250,25 @@ class MatchAnalysisRunner:
         }
         for obj in analysis.objects:
             x1, y1, x2, y2 = (int(value) for value in obj.bbox_xyxy)
+            track_number = obj.track_id.rsplit("-", 1)[-1]
+            identity = (
+                f"N{obj.shirt_number} ID {track_number}"
+                if obj.shirt_number is not None
+                else f"ID {track_number}"
+            )
             if obj.role == ObjectRole.BALL:
                 color = colors["ball"]
                 label = "BALLON"
             elif obj.role == ObjectRole.GOALKEEPER:
                 color = colors["goalkeeper"]
-                label = "GB"
+                label = f"GB {identity}"
             elif obj.role == ObjectRole.REFEREE:
                 color = colors["referee"]
-                label = "ARBITRE/JUGE"
+                label = f"ARBITRE/JUGE {identity}"
             else:
                 color = colors.get(obj.team_key or "unknown", colors["unknown"])
                 team_label = (team_labels or {}).get(obj.team_key or "", "EQUIPE ?")
-                label = f"J {team_label}"
-            track_number = obj.track_id.rsplit("-", 1)[-1]
-            if obj.role != ObjectRole.BALL:
-                label = f"{label} #{track_number}"
+                label = f"J {team_label} {identity}"
             cv2.rectangle(
                 preview,
                 (x1, y1),
@@ -1318,7 +1542,11 @@ class MatchAnalysisRunner:
         initializing: bool = False,
         operation: str = "Tracking",
     ) -> str:
-        engine = backend.upper()
+        engine_names = {
+            "tracklab": "TRACKLAB + SN-GAMESTATE",
+            "winner2025": "SOCCERNETGSR WINNER 2025",
+        }
+        engine = engine_names.get(backend, backend.upper())
         if backend == "yolo":
             engine = f"YOLO {device.upper()}"
         if initializing:
@@ -1380,14 +1608,28 @@ class MatchAnalysisRunner:
                     "start_ms": analysis.timestamp_ms,
                     "end_ms": analysis.timestamp_ms,
                     "confidence_sum": 0.0,
+                    "identity_confidence_sum": 0.0,
                     "samples": 0,
                     "team_votes": Counter(),
                     "shirt_votes": Counter(),
                     "points": [],
+                    "engine": obj.metadata.get("gsr_engine", "legacy"),
+                    "source_track_id": obj.metadata.get("gsr_source_track_id"),
                 },
             )
             summary["end_ms"] = analysis.timestamp_ms
             summary["confidence_sum"] += obj.confidence
+            identity_components = [obj.confidence]
+            for key in (
+                "reid_confidence",
+                "role_confidence",
+                "team_confidence",
+                "jersey_confidence",
+            ):
+                value = obj.metadata.get(key)
+                if value is not None:
+                    identity_components.append(max(0.0, min(1.0, float(value))))
+            summary["identity_confidence_sum"] += min(identity_components)
             summary["samples"] += 1
             if obj.team_key:
                 summary["team_votes"][obj.team_key] += 1
@@ -1430,10 +1672,19 @@ class MatchAnalysisRunner:
                     role=summary["role"],
                     team=self.team_by_key.get(team_key),
                     predicted_shirt_number=shirt_number,
-                    identity_confidence=round(summary["confidence_sum"] / samples, 4),
+                    identity_confidence=round(
+                        summary.get("identity_confidence_sum", summary["confidence_sum"])
+                        / samples,
+                        4,
+                    ),
                     video_start_ms=summary["start_ms"],
                     video_end_ms=summary["end_ms"],
-                    metadata={"samples": samples, "points": summary["points"]},
+                    metadata={
+                        "samples": samples,
+                        "points": summary["points"],
+                        "engine": summary.get("engine", "legacy"),
+                        "source_track_id": summary.get("source_track_id"),
+                    },
                 )
             )
         Track.objects.bulk_create(tracks, batch_size=500)

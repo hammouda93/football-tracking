@@ -39,7 +39,14 @@ class Command(BaseCommand):
                     checks.append((True, binary, version))
             else:
                 checks.append((False, binary, "absent du PATH"))
-        if settings.ANALYSIS_BACKEND == "yolo":
+        needs_yolo = (
+            settings.ANALYSIS_ATHLETE_ENGINE == "legacy"
+            and settings.ANALYSIS_BACKEND == "yolo"
+        ) or (
+            settings.ANALYSIS_ATHLETE_ENGINE != "legacy"
+            and settings.GSR_BALL_BACKEND == "yolo"
+        )
+        if needs_yolo:
             for module_name in ["ultralytics", "supervision"]:
                 try:
                     module = importlib.import_module(module_name)
@@ -49,6 +56,37 @@ class Command(BaseCommand):
                     checks.append((True, module_name, getattr(module, "__version__", "installé")))
             model = Path(settings.YOLO_MODEL_PATH)
             checks.append((model.exists(), "poids YOLO", str(model)))
+        if settings.ANALYSIS_ATHLETE_ENGINE != "legacy":
+            command = settings.GSR_RUNNER_COMMAND
+            precomputed = settings.GSR_PRECOMPUTED_RESULT
+            if precomputed:
+                checks.append(
+                    (
+                        True,
+                        "passerelle GSR",
+                        f"résultat pré-calculé configuré ({settings.ANALYSIS_ATHLETE_ENGINE})",
+                    )
+                )
+            elif command:
+                executable = command[0]
+                resolved = shutil.which(executable) or (
+                    executable if Path(executable).is_file() else None
+                )
+                checks.append(
+                    (
+                        bool(resolved),
+                        "passerelle GSR",
+                        f"{settings.ANALYSIS_ATHLETE_ENGINE}: {' '.join(command)}",
+                    )
+                )
+            else:
+                checks.append(
+                    (
+                        False,
+                        "passerelle GSR",
+                        "GSR_RUNNER_COMMAND_JSON est vide",
+                    )
+                )
         for ok, label, detail in checks:
             marker = self.style.SUCCESS("OK") if ok else self.style.ERROR("MANQUANT")
             self.stdout.write(f"[{marker}] {label}: {detail}")

@@ -13,7 +13,11 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 - Traitement indépendant de chaque mi-temps pour réinitialiser les trackers et limiter les dérives.
 - Compensation pan/tilt/zoom par ORB, RANSAC et homographies par plan caméra.
 - Projection métrique 105 × 68 m lorsque quatre points terrain ou plus sont fournis.
-- Backend YOLO + BoT-SORT (compensation du mouvement caméra) pour joueurs, gardiens, arbitres et ballon ; ByteTrack reste disponible comme référence.
+- Backend YOLO + BoT-SORT/ByteTrack local toujours disponible.
+- Adaptateur GSR versionné pour TrackLab + `sn-gamestate` ou le moteur
+  SoccernetGSR Winner 2025, exécutés dans un environnement GPU séparé.
+- Fusion des athlètes GSR (ReID, rôle, équipe, maillot, terrain) avec le
+  détecteur de ballon local ; aucune fonctionnalité football n'est supprimée.
 - Deux groupes de maillots appris automatiquement dans la vidéo par K-means,
   sans utiliser les couleurs décoratives saisies lors de l'import. Un bouton
   permet d'inverser une fois la correspondance groupe A/B vers les deux clubs.
@@ -30,15 +34,29 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 ```mermaid
 flowchart TD
     A["Vidéo complète"] --> B["Qualité + périodes"]
-    B --> C["Référence main.py · 8 × 5 s"]
-    C --> D["Validation · 2 × 60 s"]
+    B --> C["Moteur athlètes · local ou GSR"]
+    C --> I["Test court · 8 × 5 s"]
+    I --> D["Validation · 2 × 60 s"]
     D --> E{"Détections fiables ?"}
     E -->|Non| F["Corriger modèle + correspondance A/B"]
     E -->|Oui| G["Analyse complète"]
     G --> H["Ball in play + actions + statistiques"]
 ```
 
-Le détail des décisions techniques et des limites est dans [docs/architecture.md](docs/architecture.md).
+Le détail des décisions techniques et des limites est dans
+[docs/architecture.md](docs/architecture.md). La passerelle professionnelle est
+documentée dans [docs/gsr-integration.md](docs/gsr-integration.md).
+
+Pour installer et activer le vrai pipeline officiel TrackLab + sn-gamestate
+dans un environnement WSL2 séparé, sans toucher au `.venv` Django :
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\scripts\gsr\install_tracklab_windows.ps1
+```
+
+Le script sauvegarde le `.env` avant toute activation et refuse par défaut un
+calcul CPU impraticable. Aucun nouvel upload du match n'est nécessaire.
 
 ## Installation rapide — Windows 10/11
 
@@ -99,7 +117,7 @@ Le serveur Django et le worker sont volontairement séparés : l’interface res
    la vision apprend les maillots directement sur les joueurs détectés.
 2. Importer chaque effectif en CSV (`name,shirt_number,position`).
 3. Cliquer sur **1. Détecter/recalculer les mi-temps**. La coupure centrale est proposée automatiquement ; vérifier puis confirmer les quatre limites vidéo modifiables.
-4. Lancer **2a. Référence main.py · 40 s**. Il contrôle huit séquences de 5 secondes réparties dans les deux mi-temps. Chaque aperçu compare la sortie YOLO brute à gauche et le tracking réellement utilisé à droite.
+4. Lancer **2a. Test court · 40 s**. Il contrôle huit séquences de 5 secondes réparties dans les deux mi-temps. Chaque aperçu compare la sortie du moteur à gauche et les objets réellement utilisés à droite.
 5. Vérifier que groupe A/B correspond aux bons clubs ; utiliser **Inverser les
    équipes A/B** si les noms sont retournés, puis relancer la référence.
 6. Lancer ensuite **2b. Test de validation · 2 min**. Il applique exactement le même moteur sur deux séquences continues de 60 secondes, une par mi-temps, et mesure le ballon visible, les joueurs par image, l’équilibre des équipes et la fragmentation des pistes. Ces deux tests affichent le tracking dans la page et dans une fenêtre OpenCV fluide sous Windows. `ESC` annule le test.
@@ -120,6 +138,7 @@ Les valeurs se trouvent dans `.env` :
 | Variable | Défaut | Rôle |
 |---|---:|---|
 | `ANALYSIS_BACKEND` | `heuristic` | `heuristic` ou `yolo` |
+| `ANALYSIS_ATHLETE_ENGINE` | `legacy` | `legacy`, `tracklab` ou `winner2025` ; le ballon reste séparé |
 | `ANALYSIS_SAMPLE_SECONDS` | `1.0` | Pas initial de diagnostic |
 | `ANALYSIS_QUALITY_MAX_SAMPLES` | `360` | Nombre maximal d’images lues directement pendant le contrôle qualité |
 | `ANALYSIS_TRACKING_FPS` | `12.5` | Images analysées par seconde |
@@ -140,6 +159,12 @@ Les valeurs se trouvent dans `.env` :
 | `YOLO_GOALKEEPER_CLASS_IDS` | `1` | IDs numériques des classes gardien |
 | `YOLO_REFEREE_CLASS_IDS` | `3` | IDs numériques des classes arbitre |
 | `YOLO_BALL_CLASS_IDS` | `0` | IDs numériques des classes ballon |
+| `GSR_RUNNER_COMMAND_JSON` | `[]` | Commande argv JSON du sidecar TrackLab/Winner ; aucun shell implicite |
+| `GSR_PRECOMPUTED_RESULT` | vide | Résultat GSR v1 déjà calculé, utile pour répéter les tests sans GPU |
+| `GSR_TIMEOUT_SECONDS` | `43200` | Délai maximal du processus GSR externe |
+| `GSR_FRAME_TOLERANCE_MS` | `120` | Écart maximal entre une image vidéo et sa prédiction GSR |
+| `GSR_TRACKING_FPS` | `5.0` | Cadence séparée du moteur athlètes TrackLab ; le ballon conserve sa propre cadence |
+| `GSR_BALL_BACKEND` | `yolo` | Détecteur local `yolo`, `heuristic` ou `none` associé aux athlètes GSR |
 | `FFMPEG_BINARY` | `ffmpeg` | Binaire FFmpeg |
 | `FFPROBE_BINARY` | `ffprobe` | Binaire ffprobe |
 
