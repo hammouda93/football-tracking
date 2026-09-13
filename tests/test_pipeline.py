@@ -12,6 +12,7 @@ from pipeline.ball_in_play import BallInPlayEngine
 from pipeline.events import EventEngine
 from pipeline.periods import PeriodDetector
 from pipeline.providers.yolo import YoloVisionProvider
+from pipeline.providers.native_gsr import NativeGSRVisionProvider
 from pipeline.providers.native_identity import NativeIdentityRefiner
 from pipeline.stats import StatsAggregator
 from pipeline.runner import MatchAnalysisRunner
@@ -749,6 +750,46 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(build_provider.call_args.args[0], "yolo")
         self.assertEqual(build_provider.call_args.kwargs["player_class_ids"], [])
+
+    def test_native_gsr_retries_at_lower_resolution_after_memory_error(self):
+        class MemoryLimitedBase:
+            image_size = 1280
+
+            def __init__(self):
+                self.calls = 0
+
+            def analyze_frame(self, _frame, timestamp_ms):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("CUDA out of memory")
+                return FrameAnalysis(timestamp_ms, 320, 180, 0.8, [])
+
+        class IdentityPassthrough:
+            @staticmethod
+            def process(_frame, objects, _timestamp_ms):
+                return objects
+
+            @staticmethod
+            def diagnostics():
+                return {"status": "collecting"}
+
+        provider = NativeGSRVisionProvider.__new__(NativeGSRVisionProvider)
+        provider.base = MemoryLimitedBase()
+        provider.refiner = IdentityPassthrough()
+        provider.profile = "native_gsr"
+        provider.tracker_name = "botsort+native_reid"
+        provider.image_size = 1280
+        provider.adaptive_resizes = []
+
+        analysis = provider.analyze_frame(None, 1_000)
+
+        self.assertEqual(provider.base.calls, 2)
+        self.assertEqual(provider.image_size, 960)
+        self.assertEqual(analysis.diagnostics["image_size"], 960)
+        self.assertEqual(
+            analysis.diagnostics["adaptive_image_resizes"],
+            [{"from": 1280, "to": 960}],
+        )
 
 
 class BallInPlayTests(unittest.TestCase):

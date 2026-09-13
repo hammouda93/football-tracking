@@ -49,13 +49,42 @@ class NativeGSRVisionProvider(VisionProvider):
         ):
             setattr(self, attribute, getattr(self.base, attribute))
         self.tracker_name = "botsort+native_reid"
+        self.adaptive_resizes: list[dict[str, int]] = []
 
     def reset(self) -> None:
         self.base.reset()
         self.refiner.reset()
 
+    @staticmethod
+    def _is_memory_error(exc: RuntimeError) -> bool:
+        message = str(exc).lower()
+        return "out of memory" in message or "not enough memory" in message
+
+    def _reduce_image_size(self) -> bool:
+        current = int(self.base.image_size)
+        next_size = next((size for size in (960, 768, 640) if size < current), None)
+        if next_size is None:
+            return False
+        self.adaptive_resizes.append({"from": current, "to": next_size})
+        self.base.image_size = next_size
+        self.image_size = next_size
+        try:  # pragma: no cover - depends on the local CUDA runtime
+            import torch
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        return True
+
     def analyze_frame(self, frame, timestamp_ms: int) -> FrameAnalysis:
-        analysis = self.base.analyze_frame(frame, timestamp_ms)
+        while True:
+            try:
+                analysis = self.base.analyze_frame(frame, timestamp_ms)
+                break
+            except RuntimeError as exc:
+                if not self._is_memory_error(exc) or not self._reduce_image_size():
+                    raise
         before = len(analysis.objects)
         analysis.objects = self.refiner.process(frame, analysis.objects, timestamp_ms)
         identity = self.refiner.diagnostics()
@@ -66,6 +95,8 @@ class NativeGSRVisionProvider(VisionProvider):
         analysis.diagnostics["tracked_athletes"] = len(analysis.athletes)
         analysis.diagnostics["tracker"] = self.tracker_name
         analysis.diagnostics["profile"] = self.profile
+        analysis.diagnostics["adaptive_image_resizes"] = list(self.adaptive_resizes)
+        analysis.diagnostics["image_size"] = self.image_size
         analysis.diagnostics["native_identity"] = identity
         analysis.diagnostics["team_calibration"] = identity
         return analysis

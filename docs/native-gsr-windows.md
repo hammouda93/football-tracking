@@ -64,6 +64,10 @@ CUDA :
 .\.venv\Scripts\python.exe -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
+Avec 4 Go de VRAM, le moteur tente 1280 px puis réduit automatiquement à 960,
+768 ou 640 uniquement si CUDA signale une mémoire insuffisante. La résolution
+réellement utilisée et chaque réduction apparaissent dans les diagnostics.
+
 ## Re-ID et honnêteté du verdict
 
 Sans `NATIVE_GSR_REID_MODEL_PATH`, le moteur calcule un descripteur déterministe
@@ -109,4 +113,3 @@ GPL-3.0 lorsque WSL/Linux fonctionne.
 - [SoccerNet sn-gamestate](https://github.com/SoccerNet/sn-gamestate) — GPL-3.0.
 - [SoccernetGSR Winner 2025](https://github.com/yinmayoo185/SoccernetGSR) —
   étude technique uniquement tant qu'aucune licence n'est publiée à la racine.
-
