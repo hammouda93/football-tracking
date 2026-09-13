@@ -17,6 +17,11 @@ if (-not (Test-Path $Python)) {
     throw "Environnement absent: lancez d'abord .\scripts\install_windows.ps1 -WithML"
 }
 
+$CudaProbe = & $Python -c "import torch; print('READY' if torch.cuda.is_available() else 'MISSING')"
+if ($LASTEXITCODE -ne 0 -or ($CudaProbe | Select-Object -Last 1) -ne "READY") {
+    throw "PyTorch ne voit pas CUDA. Corrigez l'installation PyTorch/NVIDIA avant Native GSR; le test CPU prendrait plusieurs heures."
+}
+
 New-Item -ItemType Directory -Path $ModelRoot -Force | Out-Null
 
 Write-Host "Installation de Torchreid OSNet (revision MIT f8cd150)..."
@@ -71,7 +76,24 @@ function Set-EnvValue {
 
 Set-EnvValue "ANALYSIS_BACKEND" "yolo"
 Set-EnvValue "ANALYSIS_ATHLETE_ENGINE" "legacy"
+Set-EnvValue "ANALYSIS_TRACKING_FPS" "12.5"
+Set-EnvValue "ANALYSIS_MIN_YOLO_TRACKING_FPS" "12.5"
+Set-EnvValue "ANALYSIS_DEVICE" "0"
+Set-EnvValue "ANALYSIS_LIVE_WINDOW" "1"
 Set-EnvValue "YOLO_PROFILE" "native_gsr"
+Set-EnvValue "YOLO_MODEL_PATH" "models/football-players.pt"
+Set-EnvValue "YOLO_CONFIDENCE" "0.18"
+Set-EnvValue "YOLO_BALL_CONFIDENCE" "0.12"
+Set-EnvValue "YOLO_IMAGE_SIZE" "1280"
+Set-EnvValue "YOLO_TRACKER" "botsort"
+Set-EnvValue "YOLO_TRACK_LOW_CONFIDENCE" "0.05"
+Set-EnvValue "YOLO_NEW_TRACK_CONFIDENCE" "0.20"
+Set-EnvValue "YOLO_TRACK_MATCH_THRESHOLD" "0.80"
+Set-EnvValue "YOLO_TRACK_BUFFER_SECONDS" "4.8"
+Set-EnvValue "YOLO_PLAYER_CLASS_IDS" "2"
+Set-EnvValue "YOLO_GOALKEEPER_CLASS_IDS" "1"
+Set-EnvValue "YOLO_REFEREE_CLASS_IDS" "3"
+Set-EnvValue "YOLO_BALL_CLASS_IDS" "0"
 Set-EnvValue "NATIVE_GSR_REID_BACKEND" "torchreid"
 Set-EnvValue "NATIVE_GSR_REID_MODEL_NAME" "osnet_x0_25"
 Set-EnvValue "NATIVE_GSR_REID_MODEL_PATH" "models/native-gsr/$ReIdFileName"
