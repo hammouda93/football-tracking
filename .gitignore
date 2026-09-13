@@ -14,6 +14,11 @@ models/*.onnx
 models/*.engine
 models/*.pth
 models/*.tar
+models/**/*.pt
+models/**/*.onnx
+models/**/*.engine
+models/**/*.pth
+models/**/*.tar
 *.mp4
 *.mov
 *.mkv
