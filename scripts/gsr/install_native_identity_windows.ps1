@@ -11,7 +11,6 @@ $ReIdFileName = "osnet_x0_25_msmt17.pth"
 $ReIdPath = Join-Path $ModelRoot $ReIdFileName
 $ReIdUrl = "https://huggingface.co/kaiyangzhou/osnet/resolve/main/osnet_x0_25_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth?download=true"
 $ReIdSha256 = "cf55163d78fc44c62c82f85ab62d39f10438679b5abe8c698ae08cfa84aa6e18"
-$TorchReIdCommit = "f8cd150fdf77e8d9e1ed143b7f308c2c609ded50"
 
 if (-not (Test-Path $Python)) {
     throw "Environnement absent: lancez d'abord .\scripts\install_windows.ps1 -WithML"
@@ -38,10 +37,10 @@ if ($LASTEXITCODE -ne 0) {
 
 New-Item -ItemType Directory -Path $ModelRoot -Force | Out-Null
 
-Write-Host "Installation de Torchreid OSNet (revision MIT f8cd150)..."
-& $Python -m pip install "git+https://github.com/KaiyangZhou/deep-person-reid.git@$TorchReIdCommit"
+Write-Host "OSNet natif inclus: aucune compilation Torchreid/Cython requise."
+& $Python -c "from pipeline.providers.osnet import OSNetFeatureExtractor; print('Architecture OSNet native prete')"
 if ($LASTEXITCODE -ne 0) {
-    throw "Installation Torchreid impossible. Le .env n'a pas ete modifie."
+    throw "Chargement de l'architecture OSNet impossible. Le .env n'a pas ete modifie."
 }
 
 if (-not $SkipEasyOcr) {
@@ -64,6 +63,10 @@ if (-not (Test-Path $ReIdPath)) {
 $ActualHash = (Get-FileHash -Path $ReIdPath -Algorithm SHA256).Hash.ToLowerInvariant()
 if ($ActualHash -ne $ReIdSha256) {
     throw "SHA256 OSNet incorrect. Supprimez $ReIdPath puis relancez."
+}
+& $Python -c "from pipeline.providers.osnet import OSNetFeatureExtractor; model = OSNetFeatureExtractor(r'$ReIdPath', '0'); print('OSNet valide:', model.matched_layers, 'couches chargees sur CUDA')"
+if ($LASTEXITCODE -ne 0) {
+    throw "Le checkpoint OSNet ne se charge pas. Le .env n'a pas ete modifie."
 }
 
 if (-not (Test-Path $EnvPath)) {
@@ -113,7 +116,7 @@ Set-EnvValue "YOLO_PLAYER_CLASS_IDS" "2"
 Set-EnvValue "YOLO_GOALKEEPER_CLASS_IDS" "1"
 Set-EnvValue "YOLO_REFEREE_CLASS_IDS" "3"
 Set-EnvValue "YOLO_BALL_CLASS_IDS" "0"
-Set-EnvValue "NATIVE_GSR_REID_BACKEND" "torchreid"
+Set-EnvValue "NATIVE_GSR_REID_BACKEND" "osnet"
 Set-EnvValue "NATIVE_GSR_REID_MODEL_NAME" "osnet_x0_25"
 Set-EnvValue "NATIVE_GSR_REID_MODEL_PATH" "models/native-gsr/$ReIdFileName"
 Set-EnvValue "NATIVE_GSR_JERSEY_ENGINE" $(if ($SkipEasyOcr) { "auto" } else { "easyocr" })
@@ -126,7 +129,7 @@ Set-EnvValue "YOLO_BALL_RECOVERY_IMAGE_SIZE" "960"
 Set-EnvValue "YOLO_BALL_RECOVERY_OVERLAP" "0.15"
 Set-EnvValue "NATIVE_GSR_STRICT_VALIDATION" "1"
 
-Write-Host "Re-ID OSNet installe et verifie."
+Write-Host "Re-ID OSNet natif installe et verifie."
 Write-Host "Sauvegarde de l'ancien .env: $BackupPath"
 Write-Host "Le terrain 97 points exige encore un checkpoint ONNX + son schema correspondant."
 Write-Host "Redemarrez avec .\scripts\start_local.ps1 puis lancez uniquement le test 40 s."

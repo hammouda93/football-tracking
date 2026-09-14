@@ -144,9 +144,15 @@ YOLO_REFEREE_CLASS_IDS = _csv_ints("YOLO_REFEREE_CLASS_IDS", "3")
 YOLO_BALL_CLASS_IDS = _csv_ints("YOLO_BALL_CLASS_IDS", "0")
 NATIVE_GSR_REID_MODEL_PATH = _optional_project_path("NATIVE_GSR_REID_MODEL_PATH")
 NATIVE_GSR_REID_BACKEND = os.getenv("NATIVE_GSR_REID_BACKEND", "auto").strip().lower()
-if NATIVE_GSR_REID_BACKEND not in {"auto", "torchreid", "onnx", "ultralytics"}:
+if NATIVE_GSR_REID_BACKEND not in {
+    "auto",
+    "osnet",
+    "torchreid",
+    "onnx",
+    "ultralytics",
+}:
     raise ValueError(
-        "NATIVE_GSR_REID_BACKEND doit valoir auto, torchreid, onnx ou ultralytics."
+        "NATIVE_GSR_REID_BACKEND doit valoir auto, osnet, torchreid, onnx ou ultralytics."
     )
 NATIVE_GSR_REID_MODEL_NAME = os.getenv(
     "NATIVE_GSR_REID_MODEL_NAME", "osnet_x0_25"

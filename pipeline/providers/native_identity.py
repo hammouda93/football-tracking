@@ -124,21 +124,15 @@ class NativeAppearanceEncoder:
                 self.model_kind = "onnx"
                 self.backend = "onnx_embeddings"
                 return
-            if self.requested_backend == "torchreid" or ".pth" in suffixes:
-                from torchreid.utils import FeatureExtractor
+            if self.requested_backend in {"osnet", "torchreid"} or ".pth" in suffixes:
+                from pipeline.providers.osnet import OSNetFeatureExtractor
 
-                torch_device = (
-                    "cpu"
-                    if str(self.device).strip().lower() in {"", "cpu", "none"}
-                    else "cuda"
-                )
-                self.model = FeatureExtractor(
-                    model_name=self.model_name,
+                self.model = OSNetFeatureExtractor(
                     model_path=self.model_path,
-                    device=torch_device,
+                    device=self.device,
                 )
-                self.model_kind = "torchreid"
-                self.backend = f"torchreid_{self.model_name}"
+                self.model_kind = "osnet"
+                self.backend = f"native_{self.model_name}"
                 return
             from ultralytics import YOLO
 
@@ -253,14 +247,8 @@ class NativeAppearanceEncoder:
                     self.model.setInput(np.asarray(tensors, dtype=np.float32))
                     outputs = np.asarray(self.model.forward())
                     outputs = [outputs[index].reshape(-1) for index in range(len(crops))]
-                elif self.model_kind == "torchreid":
-                    import cv2
-
-                    # Torchreid treats numpy inputs as RGB images; video frames
-                    # arrive from OpenCV as BGR.
-                    outputs = self.model(
-                        [cv2.cvtColor(crop, cv2.COLOR_BGR2RGB) for crop in crops]
-                    )
+                elif self.model_kind == "osnet":
+                    outputs = self.model(crops)
                 else:
                     outputs = self.model.embed(
                         source=crops,

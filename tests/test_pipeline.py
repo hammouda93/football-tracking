@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from pipeline.ball_in_play import BallInPlayEngine
@@ -17,7 +17,7 @@ from pipeline.periods import PeriodDetector
 from pipeline.pitch import NativePitchCalibrator, PitchLandmark, load_pitch_landmarks
 from pipeline.providers.yolo import YoloVisionProvider
 from pipeline.providers.native_gsr import NativeGSRVisionProvider
-from pipeline.providers.native_identity import NativeIdentityRefiner
+from pipeline.providers.native_identity import NativeAppearanceEncoder, NativeIdentityRefiner
 from pipeline.stats import StatsAggregator
 from pipeline.runner import MatchAnalysisRunner
 from pipeline.types import (
@@ -847,6 +847,28 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(diagnostics["verdict"], "warning")
         self.assertIn("Re-ID profond", " ".join(diagnostics["issues"]))
+
+    def test_pth_reid_uses_bundled_osnet_without_torchreid_package(self):
+        fake_module = ModuleType("pipeline.providers.osnet")
+
+        class FakeExtractor:
+            def __init__(self, model_path, device):
+                self.model_path = model_path
+                self.device = device
+
+        fake_module.OSNetFeatureExtractor = FakeExtractor
+        with tempfile.NamedTemporaryFile(suffix=".pth") as checkpoint:
+            with patch.dict(sys.modules, {"pipeline.providers.osnet": fake_module}):
+                encoder = NativeAppearanceEncoder(
+                    checkpoint.name,
+                    "0",
+                    backend="osnet",
+                    model_name="osnet_x0_25",
+                )
+
+        self.assertEqual(encoder.model_kind, "osnet")
+        self.assertEqual(encoder.backend, "native_osnet_x0_25")
+        self.assertEqual(encoder.model.device, "0")
 
     @patch("pipeline.runner.build_provider")
     def test_native_gsr_profile_selects_native_windows_provider(self, build_provider):

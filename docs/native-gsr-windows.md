@@ -59,6 +59,8 @@ YOLO_REFEREE_CLASS_IDS=3
 YOLO_BALL_CLASS_IDS=0
 
 NATIVE_GSR_REID_MODEL_PATH=
+NATIVE_GSR_REID_BACKEND=osnet
+NATIVE_GSR_REID_MODEL_NAME=osnet_x0_25
 NATIVE_GSR_MAX_GAP_SECONDS=3.0
 NATIVE_GSR_JERSEY_ENGINE=easyocr
 NATIVE_GSR_JERSEY_DEVICE=cpu
@@ -89,8 +91,11 @@ de couleur et texture. Il convient aux liaisons courtes mais ne suffit pas pour
 garantir l'identité d'un joueur après une longue disparition. L'interface
 affiche alors `histogram` et ajoute un avertissement au verdict.
 
-Le script `install_native_identity_windows.ps1` installe la révision épinglée de
-Torchreid, télécharge OSNet x0.25 MSMT17 et vérifie son SHA-256. Il installe aussi
+Le script `install_native_identity_windows.ps1` utilise l'inférence OSNet x0.25
+incluse dans le projet, télécharge le checkpoint officiel MSMT17 et vérifie son
+SHA-256. Cette couche est compatible avec les poids deep-person-reid mais évite
+son extension d'évaluation Cython, inutile ici et fragile à compiler sous Windows.
+Il installe aussi
 EasyOCR sur CPU afin de conserver les 4 Go de VRAM pour YOLO et OSNet. Le moteur
 n'assimile jamais `football-players.pt` à un modèle OCR de maillot.
 
@@ -143,6 +148,8 @@ externe GPL-3.0 lorsque Linux/WSL fonctionne.
 ## Licences et références
 
 - [TrackLab](https://github.com/TrackingLaboratory/tracklab) — MIT.
+- [deep-person-reid / OSNet](https://github.com/KaiyangZhou/deep-person-reid) —
+  architecture OSNet adaptée sous licence MIT pour l'inférence locale.
 - [SoccerNet sn-gamestate](https://github.com/SoccerNet/sn-gamestate) — GPL-3.0.
 - [SoccernetGSR Winner 2025](https://github.com/yinmayoo185/SoccernetGSR) —
   étude technique uniquement tant qu'aucune licence n'est publiée à la racine.

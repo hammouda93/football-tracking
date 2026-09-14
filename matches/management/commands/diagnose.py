@@ -82,16 +82,16 @@ class Command(BaseCommand):
                     str(reid_path) if settings.NATIVE_GSR_REID_MODEL_PATH else "non configurés",
                 )
             )
-            if settings.NATIVE_GSR_REID_BACKEND == "torchreid" or (
+            if settings.NATIVE_GSR_REID_BACKEND in {"osnet", "torchreid"} or (
                 settings.NATIVE_GSR_REID_MODEL_PATH
                 and ".pth" in reid_path.name.lower()
             ):
                 try:
-                    importlib.import_module("torchreid")
-                except ImportError as exc:
-                    checks.append((False, "torchreid", str(exc)))
+                    importlib.import_module("pipeline.providers.osnet")
+                except (ImportError, RuntimeError) as exc:
+                    checks.append((False, "OSNet natif", str(exc)))
                 else:
-                    checks.append((True, "torchreid", "OSNet disponible"))
+                    checks.append((True, "OSNet natif", "inférence PyTorch disponible"))
 
             jersey_engine = settings.NATIVE_GSR_JERSEY_ENGINE
             if jersey_engine == "easyocr":
