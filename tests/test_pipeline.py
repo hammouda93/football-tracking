@@ -702,6 +702,7 @@ class VideoSamplingTests(unittest.TestCase):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {"analysis_mode": "sample"}
         runner._live_track_history = {}
+        runner._live_debug_overlay = False
         analysis = FrameAnalysis(
             timestamp_ms=18_000,
             width=320,
@@ -723,7 +724,7 @@ class VideoSamplingTests(unittest.TestCase):
                 "team_calibration": {"status": "ready", "samples": 20},
             },
         )
-        with patch("cv2.imshow"), patch("cv2.waitKey", return_value=0):
+        with patch("cv2.imshow"), patch("cv2.waitKey", return_value=ord("d")):
             visible = runner._show_live_tracking(
                 np.zeros((180, 320, 3), dtype=np.uint8),
                 analysis,
@@ -731,11 +732,12 @@ class VideoSamplingTests(unittest.TestCase):
                 total_ms=120_000,
                 period_number=1,
                 window_index=1,
-                window_count=8,
+                window_count=2,
                 team_labels={"home": "ST (T1)", "away": "CSS (T2)"},
             )
 
         self.assertTrue(visible)
+        self.assertTrue(runner._live_debug_overlay)
         self.assertEqual(len(analysis.objects), 1)
 
     def test_reference_uses_eight_five_second_windows_across_both_halves(self):
@@ -759,7 +761,7 @@ class VideoSamplingTests(unittest.TestCase):
             [1, 1, 1, 1, 2, 2, 2, 2],
         )
 
-    def test_validation_sample_keeps_two_minutes_across_both_halves(self):
+    def test_validation_sample_uses_one_continuous_minute_per_half(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {
             "analysis_mode": "sample",
@@ -777,6 +779,14 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(
             sum(item["end_ms"] - item["start_ms"] for item in windows),
             120_000,
+        )
+        self.assertEqual(
+            [item["end_ms"] - item["start_ms"] for item in windows],
+            [60_000, 60_000],
+        )
+        self.assertEqual(
+            [item["period"].number for item in windows],
+            [1, 2],
         )
 
     def test_diagnostics_fail_bad_ball_team_and_track_detection(self):

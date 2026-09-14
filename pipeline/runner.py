@@ -326,7 +326,7 @@ class MatchAnalysisRunner:
         operation = (
             "Test court"
             if self.analysis_mode == "reference"
-            else ("Test rapide" if self.analysis_mode == "sample" else "Tracking")
+            else ("Validation 2 min" if self.analysis_mode == "sample" else "Tracking")
         )
         progress_backend = backend if athlete_engine == "legacy" else athlete_engine
         self._save_live_progress(
@@ -403,6 +403,7 @@ class MatchAnalysisRunner:
         )
         native_live_requested = native_live_enabled
         self._live_track_history: dict[str, list[tuple[int, int]]] = {}
+        self._live_debug_overlay = False
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
             temp_path = Path(temp_dir)
@@ -1067,26 +1068,28 @@ class MatchAnalysisRunner:
 
         preview = frame.copy()
         _frame_height, frame_width = preview.shape[:2]
-        raw_colors = {
-            "player": (255, 0, 255),
-            "goalkeeper": (255, 120, 0),
-            "referee": (255, 255, 0),
-            "ball": (0, 255, 255),
-        }
-        for detection in analysis.diagnostics.get("raw_detections", []):
-            box = detection.get("bbox") or []
-            if len(box) < 4:
-                continue
-            role = str(detection.get("role", "player"))
-            x1, y1, x2, y2 = (int(value) for value in box[:4])
-            color = raw_colors.get(role, (255, 0, 255))
-            cv2.rectangle(
-                preview,
-                (x1, y1),
-                (x2, y2),
-                color,
-                2 if role == "ball" else 1,
-            )
+        debug_overlay = bool(getattr(self, "_live_debug_overlay", False))
+        if debug_overlay:
+            raw_colors = {
+                "player": (255, 0, 255),
+                "goalkeeper": (255, 120, 0),
+                "referee": (255, 255, 0),
+                "ball": (0, 255, 255),
+            }
+            for detection in analysis.diagnostics.get("raw_detections", []):
+                box = detection.get("bbox") or []
+                if len(box) < 4:
+                    continue
+                role = str(detection.get("role", "player"))
+                x1, y1, x2, y2 = (int(value) for value in box[:4])
+                color = raw_colors.get(role, (255, 0, 255))
+                cv2.rectangle(
+                    preview,
+                    (x1, y1),
+                    (x2, y2),
+                    color,
+                    2 if role == "ball" else 1,
+                )
 
         final_colors = {
             "home": (70, 220, 120),
@@ -1105,6 +1108,9 @@ class MatchAnalysisRunner:
                 if obj.shirt_number is not None
                 else f"ID {track_number}"
             )
+            roster_name = str(obj.metadata.get("roster_player_name") or "").strip()
+            if roster_name:
+                identity = f"{identity} {roster_name}"
             if obj.role == ObjectRole.BALL:
                 color = final_colors["ball"]
                 label = "BALLON"
@@ -1178,7 +1184,31 @@ class MatchAnalysisRunner:
         raw_players = int(analysis.diagnostics.get("raw_athlete_detections", 0))
         tracked_players = len(analysis.athletes)
         raw_balls = int(analysis.diagnostics.get("raw_ball_detections", 0))
-        calibration = analysis.diagnostics.get("team_calibration") or {}
+        identity_diagnostics = (
+            analysis.diagnostics.get("native_identity")
+            or analysis.diagnostics.get("team_calibration")
+            or {}
+        )
+        team_status = str(
+            identity_diagnostics.get("status", "collecting")
+        ).upper()
+        reid_backend = str(
+            identity_diagnostics.get("appearance_backend", "none")
+        ).upper()
+        reid_status = (
+            "ACTIF" if identity_diagnostics.get("deep_reid_ready") else "FALLBACK"
+        )
+        jersey_tracklets = int(identity_diagnostics.get("jersey_tracklets", 0))
+        canonical_tracks = int(identity_diagnostics.get("canonical_tracks", 0))
+        stitched = int(identity_diagnostics.get("fragments_stitched", 0))
+        duplicates = int(identity_diagnostics.get("duplicates_removed", 0))
+        ball_source = (
+            str(analysis.ball.metadata.get("ball_engine", "inconnue"))
+            .replace("yolo_", "")
+            .upper()
+            if analysis.ball
+            else "-"
+        )
         operation = "REFERENCE 40 S" if self.analysis_mode == "reference" else "TEST 2 MIN"
         header_1 = (
             f"{operation} {elapsed_s:05.1f}/{total_s:.0f}s"
@@ -1186,19 +1216,25 @@ class MatchAnalysisRunner:
             f" | VIDEO={self._duration_label(analysis.timestamp_ms / 1000)}"
         )
         header_2 = (
-            f"RAW JOUEURS={raw_players} | TRACKES={tracked_players}"
-            f" | PERDUS={max(0, raw_players - tracked_players)}"
+            f"MODE={'BRUT+FINAL' if debug_overlay else 'FINAL'}"
+            f" | RAW JOUEURS={raw_players} | FINAUX={tracked_players}"
+            f" | ECART={max(0, raw_players - tracked_players)}"
         )
         header_3 = (
-            f"RAW BALL={raw_balls} | BALL={'OUI' if analysis.ball else 'NON'}"
-            f" | MAILLOTS={str(calibration.get('status', 'collecting')).upper()}"
-            f" ({int(calibration.get('samples', 0))}) | ESC=ARRETER"
+            f"RE-ID={reid_backend} {reid_status} | EQUIPES={team_status}"
+            f" | OCR NUMEROS={jersey_tracklets}/{canonical_tracks}"
         )
-        cv2.rectangle(preview, (0, 0), (frame_width, 92), (15, 15, 15), -1)
+        header_4 = (
+            f"BALL RAW={raw_balls} FINAL={'OUI' if analysis.ball else 'NON'}"
+            f" SOURCE={ball_source} | FUSIONS={stitched} | DOUBLONS={duplicates}"
+            " | D=BRUT | ESC=ARRETER"
+        )
+        cv2.rectangle(preview, (0, 0), (frame_width, 120), (15, 15, 15), -1)
         for line, y, size in (
-            (header_1, 25, 0.58),
-            (header_2, 53, 0.56),
-            (header_3, 80, 0.53),
+            (header_1, 25, 0.56),
+            (header_2, 53, 0.52),
+            (header_3, 80, 0.49),
+            (header_4, 107, 0.46),
         ):
             cv2.putText(
                 preview,
@@ -1224,6 +1260,8 @@ class MatchAnalysisRunner:
                 exc,
             )
             return False
+        if key in {ord("d"), ord("D")}:
+            self._live_debug_overlay = not debug_overlay
         if key == 27:
             cv2.destroyAllWindows()
             raise AnalysisCancelled()
@@ -1295,6 +1333,9 @@ class MatchAnalysisRunner:
                 if obj.shirt_number is not None
                 else f"ID {track_number}"
             )
+            roster_name = str(obj.metadata.get("roster_player_name") or "").strip()
+            if roster_name:
+                identity = f"{identity} {roster_name}"
             if is_ball:
                 label = "BALLON"
             elif obj.role == ObjectRole.GOALKEEPER:
@@ -1399,6 +1440,9 @@ class MatchAnalysisRunner:
                 if obj.shirt_number is not None
                 else f"ID {track_number}"
             )
+            roster_name = str(obj.metadata.get("roster_player_name") or "").strip()
+            if roster_name:
+                identity = f"{identity} {roster_name}"
             if obj.role == ObjectRole.BALL:
                 color = colors["ball"]
                 label = "BALLON"
@@ -1429,13 +1473,42 @@ class MatchAnalysisRunner:
                 1,
                 cv2.LINE_AA,
             )
-        cv2.rectangle(preview, (8, 8), (850, 38), (20, 20, 20), -1)
+        identity_diagnostics = (
+            analysis.diagnostics.get("native_identity")
+            or analysis.diagnostics.get("team_calibration")
+            or {}
+        )
+        reid_backend = str(
+            identity_diagnostics.get("appearance_backend", "none")
+        ).upper()
+        team_status = str(
+            identity_diagnostics.get("status", "collecting")
+        ).upper()
+        jersey_tracklets = int(identity_diagnostics.get("jersey_tracklets", 0))
+        ball_source = (
+            str(analysis.ball.metadata.get("ball_engine", "inconnue"))
+            .replace("yolo_", "")
+            .upper()
+            if analysis.ball
+            else "-"
+        )
+        cv2.rectangle(preview, (8, 8), (1120, 66), (20, 20, 20), -1)
         cv2.putText(
             preview,
-            f"TRACKING LIVE - VIDEO {MatchAnalysisRunner._duration_label(analysis.timestamp_ms / 1000)}",
-            (18, 28),
+            f"TRACKING FINAL - VIDEO {MatchAnalysisRunner._duration_label(analysis.timestamp_ms / 1000)}",
+            (18, 29),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.50,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            preview,
+            f"RE-ID={reid_backend} | EQUIPES={team_status} | OCR={jersey_tracklets} | BALL={ball_source}",
+            (18, 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.44,
             (245, 245, 245),
             1,
             cv2.LINE_AA,

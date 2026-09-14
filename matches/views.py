@@ -481,11 +481,11 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
         return redirect(match)
 
     mode = request.POST.get("mode", "sample")
-    if mode not in {"prepare", "reference", "sample", "full"}:
+    if mode not in {"prepare", "sample", "full"}:
         messages.error(request, "Mode d’analyse invalide.")
         return redirect(match)
     confirmed_periods = list(match.periods.filter(confirmed=True).order_by("number"))
-    if mode in {"reference", "sample", "full"} and len(confirmed_periods) != 2:
+    if mode in {"sample", "full"} and len(confirmed_periods) != 2:
         messages.warning(
             request,
             "Confirme d’abord les limites des deux mi-temps avant de lancer ce test.",
@@ -578,8 +578,8 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
             "gsr_tracking_fps": settings.GSR_TRACKING_FPS,
             "gsr_ball_backend": settings.GSR_BALL_BACKEND,
             "home_team_cluster": match.home_team_cluster,
-            "sample_window_seconds": 5 if mode == "reference" else 60,
-            "sample_windows_per_half": 4 if mode == "reference" else 1,
+            "sample_window_seconds": 60,
+            "sample_windows_per_half": 1,
             "render_clips": mode == "full",
         },
     )
@@ -587,8 +587,7 @@ def start_analysis(request: HttpRequest, pk) -> HttpResponse:
     match.save(update_fields=["status", "updated_at"])
     labels = {
         "prepare": "Détection automatique des mi-temps",
-        "reference": "Test court de 40 secondes",
-        "sample": "Test de validation de 2 minutes",
+        "sample": "Test de validation de 2 minutes (1 minute continue par mi-temps)",
         "full": "Analyse complète",
     }
     messages.success(request, f"{labels[mode]} · {str(run.pk)[:8]} mis en file.")
@@ -618,7 +617,7 @@ def swap_team_clusters(request: HttpRequest, pk) -> HttpResponse:
 
     messages.success(
         request,
-        "Correspondance des groupes A/B inversée. Relance la référence 40 s.",
+        "Correspondance des groupes A/B inversée. Relance le test de validation de 2 minutes.",
     )
     return redirect(match)
 

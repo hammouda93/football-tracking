@@ -38,8 +38,7 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 flowchart TD
     A["Vidéo complète"] --> B["Qualité + périodes"]
     B --> C["Moteur athlètes · local ou GSR"]
-    C --> I["Test court · 8 × 5 s"]
-    I --> D["Validation · 2 × 60 s"]
+    C --> D["Validation · 2 × 60 s continues"]
     D --> E{"Détections fiables ?"}
     E -->|Non| F["Corriger modèle + correspondance A/B"]
     E -->|Oui| G["Analyse complète"]
@@ -123,10 +122,9 @@ Le serveur Django et le worker sont volontairement séparés : l’interface res
    la vision apprend les maillots directement sur les joueurs détectés.
 2. Importer chaque effectif en CSV (`name,shirt_number,position`).
 3. Cliquer sur **1. Détecter/recalculer les mi-temps**. La coupure centrale est proposée automatiquement ; vérifier puis confirmer les quatre limites vidéo modifiables.
-4. Lancer **2a. Test court · 40 s**. Il contrôle huit séquences de 5 secondes réparties dans les deux mi-temps. Chaque aperçu compare la sortie du moteur à gauche et les objets réellement utilisés à droite.
-5. Vérifier que groupe A/B correspond aux bons clubs ; utiliser **Inverser les
-   équipes A/B** si les noms sont retournés, puis relancer la référence.
-6. Lancer ensuite **2b. Test de validation · 2 min**. Il applique exactement le même moteur sur deux séquences continues de 60 secondes, une par mi-temps, et mesure le ballon visible, les joueurs par image, l’équilibre des équipes et la fragmentation des pistes. Ces deux tests affichent le tracking dans la page et dans une fenêtre OpenCV fluide sous Windows. `ESC` annule le test.
+4. Lancer **2. Test · 2 min (1 min/MT)**. Il applique exactement le moteur du match complet sur deux séquences continues de 60 secondes : une au centre de la MT1, puis une au centre de la MT2. Le live affiche uniquement les objets finaux afin qu’un joueur n’ait pas deux boîtes visuelles. Dans la fenêtre OpenCV, `D` affiche ou masque les détections YOLO brutes et `ESC` annule le test.
+5. Vérifier la couverture joueurs, la stabilité des IDs, groupe A/B, gardiens, arbitres, OCR et ballon. Utiliser **Inverser les équipes A/B** si les noms sont retournés, puis relancer ce même test de 2 minutes.
+6. Télécharger la pré-annotation CSV et la corriger si une mesure IDF1/HOTA objective est souhaitée.
 7. Ne lancer **3. Analyse complète** que si le test de 2 minutes est validé. Le bouton reste verrouillé si le socle visuel échoue.
 8. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
 9. Valider ou corriger les actions en regardant le clip ou le timecode, puis exporter les résultats.

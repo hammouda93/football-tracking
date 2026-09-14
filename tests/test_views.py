@@ -62,7 +62,7 @@ class DashboardTests(TestCase):
         self.assertRedirects(response, match.get_absolute_url())
         self.assertFalse(match.analysis_runs.exists())
 
-    def test_sample_run_uses_eight_short_windows_and_no_clips(self):
+    def test_sample_run_uses_one_continuous_minute_per_half_and_no_clips(self):
         home = Team.objects.create(name="Home", short_name="HOM")
         away = Team.objects.create(name="Away", short_name="AWY")
         match = Match.objects.create(home_team=home, away_team=away)
@@ -125,7 +125,7 @@ class DashboardTests(TestCase):
 
         response = self.client.post(
             reverse("match-start-analysis", kwargs={"pk": match.pk}),
-            {"mode": "reference"},
+            {"mode": "sample"},
             follow=True,
         )
 
@@ -133,31 +133,20 @@ class DashboardTests(TestCase):
         self.assertContains(response, "GSR_RUNNER_COMMAND_JSON")
         self.assertFalse(match.analysis_runs.exists())
 
-    def test_reference_run_uses_eight_five_second_windows(self):
+    def test_removed_reference_mode_is_rejected(self):
         home = Team.objects.create(name="Home", short_name="HOM")
         away = Team.objects.create(name="Away", short_name="AWY")
         match = Match.objects.create(home_team=home, away_team=away)
-        for number, start in ((1, 0), (2, 3_300_000)):
-            MatchPeriod.objects.create(
-                match=match,
-                number=number,
-                label=f"MT{number}",
-                video_start_ms=start,
-                video_end_ms=start + 2_700_000,
-                confirmed=True,
-            )
 
         response = self.client.post(
             reverse("match-start-analysis", kwargs={"pk": match.pk}),
             {"mode": "reference"},
+            follow=True,
         )
 
-        self.assertRedirects(response, match.get_absolute_url())
-        run = match.analysis_runs.get()
-        self.assertEqual(run.config["analysis_mode"], "reference")
-        self.assertEqual(run.config["sample_window_seconds"], 5)
-        self.assertEqual(run.config["sample_windows_per_half"], 4)
-        self.assertFalse(run.config["render_clips"])
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Mode d’analyse invalide")
+        self.assertFalse(match.analysis_runs.exists())
 
     def test_team_cluster_mapping_can_be_swapped_without_changing_team_colors(self):
         home = Team.objects.create(

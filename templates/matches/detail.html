@@ -17,8 +17,7 @@
     <div class="header-actions">
       {% if match.video %}
         <form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-ghost" name="mode" value="prepare" type="submit">1. Détecter/recalculer les mi-temps</button></form>
-        {% if periods_confirmed and analysis_engine_ready %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" name="mode" value="reference" type="submit">2a. Test court · 40 s <span>▶</span></button></form>{% elif periods_confirmed %}<button class="button button-primary" type="button" disabled title="Configure la passerelle GSR dans .env">2a. Passerelle GSR à configurer</button>{% endif %}
-        {% if periods_confirmed and analysis_engine_ready %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" name="mode" value="sample" type="submit">2b. Test de validation · 2 min <span>▶</span></button></form>{% endif %}
+        {% if periods_confirmed and analysis_engine_ready %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-primary" name="mode" value="sample" type="submit">2. Test · 2 min (1 min/MT) <span>▶</span></button></form>{% elif periods_confirmed %}<button class="button button-primary" type="button" disabled title="Configure la passerelle GSR dans .env">2. Passerelle GSR à configurer</button>{% else %}<button class="button button-primary" type="button" disabled title="Confirme d’abord les deux mi-temps">2. Confirmer les mi-temps d’abord</button>{% endif %}
         {% if sample_ready %}<form method="post" action="{% url 'match-start-analysis' match.pk %}">{% csrf_token %}<button class="button button-secondary" name="mode" value="full" type="submit">3. Analyse complète</button></form>{% else %}<button class="button button-secondary" type="button" disabled title="Le test rapide doit réussir">3. Analyse complète verrouillée</button>{% endif %}
       {% endif %}
       <a class="button button-ghost" href="{% url 'match-export-report' match.pk %}">Rapport JSON</a>
@@ -37,13 +36,13 @@
       <div class="analysis-value"><strong data-progress-value>{{ latest_run.progress }}%</strong><span data-status-label>{{ latest_run.get_status_display }}</span></div>
       {% if latest_run.status == 'queued' or latest_run.status == 'processing' %}<form method="post" action="{% url 'analysis-cancel' latest_run.pk %}">{% csrf_token %}<button class="button button-danger button-small">Arrêter</button></form>{% endif %}
       {% if latest_run.error_message %}<p class="analysis-error" data-analysis-error>{{ latest_run.error_message }}</p>{% endif %}
-      {% if latest_run.status == 'queued' or latest_run.status == 'processing' %}<figure class="tracking-live" data-live-preview-container hidden><img data-live-preview data-live-preview-url="{% url 'analysis-live-preview' latest_run.pk %}" alt="Tracking annoté en direct"><figcaption>Tracking annoté en direct · actualisé automatiquement</figcaption></figure>{% endif %}
+      {% if latest_run.status == 'queued' or latest_run.status == 'processing' %}<figure class="tracking-live" data-live-preview-container hidden><img data-live-preview data-live-preview-url="{% url 'analysis-live-preview' latest_run.pk %}" alt="Tracking annoté en direct"><figcaption>Tracking final en direct · dans la fenêtre Windows, D affiche/masque YOLO brut</figcaption></figure>{% endif %}
     </section>
   {% endif %}
 
   {% if latest_mode == 'reference' or latest_mode == 'sample' %}{% if sample_diagnostics %}
     <section class="panel sample-diagnostic verdict-{{ sample_diagnostics.verdict }}">
-      <div class="panel-heading"><div><p class="eyebrow">Validation avant calcul complet</p><h2>{% if latest_mode == 'reference' %}Test court · 40 s{% else %}Test de validation · 2 min{% endif %} : {{ analysis_engine_label }} + ballon local</h2></div><span class="sample-verdict">{% if sample_diagnostics.manual_approved %}VALIDÉ MANUELLEMENT{% elif sample_diagnostics.verdict == 'pass' %}VALIDÉ{% elif sample_diagnostics.verdict == 'warning' %}À CONTRÔLER{% else %}ÉCHEC{% endif %}</span></div>
+      <div class="panel-heading"><div><p class="eyebrow">Validation avant calcul complet</p><h2>{% if latest_mode == 'reference' %}Ancien test court{% else %}Test de validation · 2 min (1 min continue/MT){% endif %} : {{ analysis_engine_label }} + ballon local</h2></div><span class="sample-verdict">{% if sample_diagnostics.manual_approved %}VALIDÉ MANUELLEMENT{% elif sample_diagnostics.verdict == 'pass' %}VALIDÉ{% elif sample_diagnostics.verdict == 'warning' %}À CONTRÔLER{% else %}ÉCHEC{% endif %}</span></div>
       <div class="diagnostic-grid">
         <div><strong>{{ sample_diagnostics.duration_seconds|floatformat:0 }} s</strong><small>vidéo testée</small></div>
         <div><strong>{{ sample_diagnostics.frames_analyzed }}</strong><small>images analysées</small></div>

@@ -2,7 +2,7 @@
 
 `YOLO_PROFILE=native_gsr` est le chemin recommandé lorsque WSL2 n'est pas
 disponible. Il s'exécute dans le même `.venv` Windows que Django et conserve les
-tests 40 s / 2 min, le live, le ballon, le jeu effectif et les exports.
+le test continu de 2 min, le live, le ballon, le jeu effectif et les exports.
 
 ## Architecture réellement exécutée
 
@@ -113,10 +113,13 @@ clubs contiennent des numéros réels et uniques. Une lecture ambiguë reste
 1. Conserver le match déjà importé ; aucun nouvel upload n'est requis.
 2. Importer les deux effectifs CSV (`name,shirt_number,position`).
 3. Recalculer les mi-temps, utiliser « Voir » puis confirmer les quatre limites.
-4. Lancer **2a. Référence main.py · 40 s** et observer le live.
-5. Contrôler détection, doublons, ST/CSS, arbitres, gardiens, ballon et stabilité IDs.
-6. Lancer **2b. Test de validation · 2 min**. Il traite deux séquences continues
-   de 60 s, une dans chaque mi-temps, avec exactement le moteur du match complet.
+4. Lancer **2. Test · 2 min (1 min/MT)**. Il traite une séquence continue
+   de 60 s au centre de la MT1, puis une séquence continue de 60 s au centre
+   de la MT2, avec exactement le moteur du match complet.
+5. Observer le live final : une seule boîte par objet. Dans la fenêtre Windows,
+   `D` affiche ou masque les détections YOLO brutes ; `ESC` arrête le test.
+6. Contrôler détection, doublons, ST/CSS, arbitres, gardiens, ballon, stabilité
+   des IDs, état OSNet et nombre de pistes ayant un numéro OCR stabilisé.
 7. Télécharger la pré-annotation CSV, corriger les boîtes/IDs/équipes/numéros,
    passer `reviewed=YES`, puis la réimporter pour obtenir HOTA@0.50 et IDF1.
 8. Lancer le match complet seulement lorsque les bloqueurs stricts sont levés.
