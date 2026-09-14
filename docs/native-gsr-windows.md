@@ -1,7 +1,7 @@
 # Native GSR Windows
 
 `YOLO_PROFILE=native_gsr` est le chemin recommandé lorsque WSL2 n'est pas
-disponible. Il s'exécute dans le même `.venv` Windows que Django et conserve les
+disponible. Il s'exécute dans le même `.venv` Windows que Django et conserve
 le test continu de 2 min, le live, le ballon, le jeu effectif et les exports.
 
 ## Architecture réellement exécutée
