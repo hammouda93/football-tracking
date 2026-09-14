@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pipeline.pitch import NativePitchCalibrator
-from pipeline.types import FrameAnalysis, ObjectRole
+from pipeline.types import FrameAnalysis, ObjectRole, TrackedObject
 
 from .base import VisionProvider
 from .native_identity import NativeIdentityRefiner
@@ -115,6 +115,100 @@ class NativeGSRVisionProvider(VisionProvider):
         return float(cv2.absdiff(gray, previous).mean() / 255.0) > 0.32
 
     @staticmethod
+    def _box_iou(first, second) -> float:
+        ax1, ay1, ax2, ay2 = [float(value) for value in first]
+        bx1, by1, bx2, by2 = [float(value) for value in second]
+        intersection = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(
+            0.0, min(ay2, by2) - max(ay1, by1)
+        )
+        first_area = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+        second_area = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+        union = first_area + second_area - intersection
+        return intersection / union if union > 0 else 0.0
+
+    @classmethod
+    def _same_person_box(cls, first, second) -> bool:
+        if cls._box_iou(first, second) >= 0.52:
+            return True
+        ax1, ay1, ax2, ay2 = [float(value) for value in first]
+        bx1, by1, bx2, by2 = [float(value) for value in second]
+        ah = max(1.0, ay2 - ay1)
+        bh = max(1.0, by2 - by1)
+        aw = max(1.0, ax2 - ax1)
+        bw = max(1.0, bx2 - bx1)
+        height_ratio = min(ah, bh) / max(ah, bh)
+        feet_distance = ((ax1 + ax2 - bx1 - bx2) / 2.0) ** 2 + (ay2 - by2) ** 2
+        return (
+            height_ratio >= 0.62
+            and feet_distance ** 0.5 <= 0.16 * max(ah, bh)
+            and abs((ax1 + ax2 - bx1 - bx2) / 2.0) <= 0.35 * max(aw, bw)
+        )
+
+    def _rescue_untracked_athletes(
+        self, analysis: FrameAnalysis
+    ) -> list[TrackedObject]:
+        """Forward confident unmatched detections to the identity layer.
+
+        ByteTrack deliberately withholds uncertain/new tracks. For validation we
+        keep those detections visible as a separately measured fallback; OSNet
+        still has to reconnect them, and they never masquerade as tracker output.
+        """
+
+        if analysis.field_score < 0.14:
+            return []
+        raw = list(analysis.diagnostics.get("raw_detections") or [])
+        accepted = [
+            obj
+            for obj in analysis.objects
+            if obj.role in {str(ObjectRole.PLAYER), str(ObjectRole.GOALKEEPER)}
+        ]
+        rescued: list[TrackedObject] = []
+        threshold = max(0.22, float(getattr(self.base, "confidence", 0.18)))
+        candidates = sorted(
+            (
+                item
+                for item in raw
+                if str(item.get("role"))
+                in {str(ObjectRole.PLAYER), str(ObjectRole.GOALKEEPER)}
+                and float(item.get("confidence", 0.0)) >= threshold
+            ),
+            key=lambda item: float(item.get("confidence", 0.0)),
+            reverse=True,
+        )
+        for index, item in enumerate(candidates):
+            try:
+                box = tuple(float(value) for value in item["bbox"])
+                x1, y1, x2, y2 = box
+            except (KeyError, TypeError, ValueError):
+                continue
+            box_height = y2 - y1
+            box_width = x2 - x1
+            if box_height < 18 or box_width <= 0 or box_width > 1.15 * box_height:
+                continue
+            if any(
+                self._same_person_box(box, obj.bbox_xyxy)
+                for obj in [*accepted, *rescued]
+            ):
+                continue
+            role = str(item["role"])
+            rescued.append(
+                TrackedObject(
+                    track_id=f"detector-rescue-{analysis.timestamp_ms}-{index}",
+                    role=role,
+                    bbox_xyxy=box,
+                    confidence=float(item["confidence"]),
+                    team_key=None,
+                    player_key=None,
+                    image_x=((x1 + x2) / 2.0) / max(analysis.width, 1),
+                    image_y=y2 / max(analysis.height, 1),
+                    metadata={"tracking_source": "detector_rescue"},
+                )
+            )
+            if len(rescued) >= 12:
+                break
+        return rescued
+
+    @staticmethod
     def _is_memory_error(exc: RuntimeError) -> bool:
         message = str(exc).lower()
         return "out of memory" in message or "not enough memory" in message
@@ -151,6 +245,9 @@ class NativeGSRVisionProvider(VisionProvider):
                 if not self._is_memory_error(exc) or not self._reduce_image_size():
                     raise
         analysis.scene_cut = bool(analysis.scene_cut or scene_cut)
+        tracker_output_athletes = len(analysis.athletes)
+        rescued = self._rescue_untracked_athletes(analysis)
+        analysis.objects.extend(rescued)
         before = len(analysis.objects)
         pitch_engine = getattr(self, "pitch", None)
         pitch_ready = bool(
@@ -186,14 +283,57 @@ class NativeGSRVisionProvider(VisionProvider):
                     continue
                 retained.append(obj)
             analysis.objects = retained
+        identity_input_athletes = len(analysis.athletes)
+        identity_before = self.refiner.diagnostics()
         analysis.objects = self.refiner.process(frame, analysis.objects, timestamp_ms)
         identity = self.refiner.diagnostics()
         pitch = pitch_engine.diagnostics() if pitch_engine else {"backend": "disabled"}
-        removed = max(0, before - len(analysis.objects))
+        native_duplicates = max(
+            0,
+            int(identity.get("duplicates_removed", 0))
+            - int(identity_before.get("duplicates_removed", 0)),
+        )
         analysis.diagnostics["duplicate_person_detections"] = int(
             analysis.diagnostics.get("duplicate_person_detections", 0)
-        ) + removed
+        ) + native_duplicates
         analysis.diagnostics["tracked_athletes"] = len(analysis.athletes)
+        analysis.diagnostics["tracker_output_athletes"] = tracker_output_athletes
+        analysis.diagnostics["detector_rescue_athletes"] = len(rescued)
+        analysis.diagnostics["native_identity_input_athletes"] = identity_input_athletes
+        analysis.diagnostics["native_identity_output_athletes"] = len(analysis.athletes)
+        analysis.diagnostics["native_duplicates_removed"] = native_duplicates
+        analysis.diagnostics["native_identity_births"] = max(
+            0,
+            int(identity.get("new_identity_observations", 0))
+            - int(identity_before.get("new_identity_observations", 0)),
+        )
+        analysis.diagnostics["native_direct_assignments"] = max(
+            0,
+            int(identity.get("direct_assignments", 0))
+            - int(identity_before.get("direct_assignments", 0)),
+        )
+        analysis.diagnostics["native_short_stitches"] = max(
+            0,
+            int(identity.get("short_stitches", 0))
+            - int(identity_before.get("short_stitches", 0)),
+        )
+        analysis.diagnostics["native_long_stitches"] = max(
+            0,
+            int(identity.get("long_stitches", 0))
+            - int(identity_before.get("long_stitches", 0)),
+        )
+        analysis.diagnostics["native_direct_rejections"] = max(
+            0,
+            int(identity.get("direct_track_rejections", 0))
+            - int(identity_before.get("direct_track_rejections", 0)),
+        )
+        before_reasons = identity_before.get("direct_rejection_reasons") or {}
+        analysis.diagnostics["native_direct_rejection_reasons"] = {
+            key: max(0, int(value) - int(before_reasons.get(key, 0)))
+            for key, value in (identity.get("direct_rejection_reasons") or {}).items()
+            if int(value) - int(before_reasons.get(key, 0)) > 0
+        }
+        analysis.diagnostics["scene_cut_tracker_reset"] = bool(scene_cut)
         analysis.diagnostics["tracker"] = self.tracker_name
         analysis.diagnostics["profile"] = self.profile
         analysis.diagnostics["adaptive_image_resizes"] = list(self.adaptive_resizes)

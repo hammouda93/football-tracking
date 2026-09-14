@@ -165,3 +165,75 @@ h2 { margin-bottom: 0; font-size: 25px; letter-spacing: -1px; }
 @media (max-width: 520px) {
   .brand small { display: none; }.top-nav .button { padding: 0 10px; }.hero h1 { font-size: 42px; }.hero-actions { flex-direction: column; }.metric-grid { grid-template-columns: 1fr; }.match-teams { flex-wrap: wrap; }.two-columns { grid-template-columns: 1fr; }.upload-form { padding: 16px; }.scoreboard { display: grid; grid-template-columns: 1fr auto 1fr; width: 100%; }.score-team { display: grid; justify-items: start; }.score-team.away { justify-items: end; }.score-team h1 { font-size: 13px; }.match-header { gap: 16px; }.analysis-banner { grid-template-columns: 34px 1fr auto; }.analysis-banner form { grid-column: 2 / 4; }.stat-row { grid-template-columns: 1fr 110px 1fr; }.stat-row > b { padding: 0 8px; font-size: 14px; }.comparison-head { grid-template-columns: 1fr 70px 1fr; }.comparison-head > span { font-size: 9px; }.roster-list { grid-template-columns: 1fr; }.site-footer { flex-direction: column; gap: 8px; }
 }
+
+
+/* Native GSR validation telemetry */
+.diagnostic-funnel {
+  margin: 18px 0;
+  padding: 14px;
+  border: 1px solid var(--line, #d9dee8);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.55);
+}
+.diagnostic-funnel-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+.diagnostic-funnel-title span {
+  color: var(--muted, #687184);
+  font-size: 0.78rem;
+}
+.diagnostic-table-scroll {
+  overflow-x: auto;
+}
+.diagnostic-stage-table {
+  width: 100%;
+  min-width: 1120px;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+.diagnostic-stage-table th,
+.diagnostic-stage-table td {
+  padding: 8px 9px;
+  border-bottom: 1px solid var(--line, #d9dee8);
+  text-align: right;
+  white-space: nowrap;
+}
+.diagnostic-stage-table th:first-child,
+.diagnostic-stage-table td:first-child {
+  text-align: left;
+}
+.diagnostic-stage-table tbody tr:first-child {
+  background: rgba(64, 104, 184, 0.08);
+}
+.identity-flow-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+.identity-flow-grid div {
+  padding: 10px;
+  border: 1px solid var(--line, #d9dee8);
+  border-radius: 10px;
+}
+.identity-flow-grid strong,
+.identity-flow-grid small {
+  display: block;
+}
+.identity-flow-grid small {
+  margin-top: 3px;
+  color: var(--muted, #687184);
+}
+@media (max-width: 720px) {
+  .diagnostic-funnel-title {
+    display: block;
+  }
+  .diagnostic-funnel-title span {
+    display: block;
+    margin-top: 4px;
+  }
+}

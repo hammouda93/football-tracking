@@ -382,7 +382,13 @@ class MatchAnalysisRunner:
         }
         camera_inliers: list[float] = []
         diagnostic_counts: Counter = Counter()
+        diagnostic_frame_series: defaultdict[str, list[int]] = defaultdict(list)
+        period_diagnostic_counts: defaultdict[int, Counter] = defaultdict(Counter)
+        period_diagnostic_series: defaultdict[
+            int, defaultdict[str, list[int]]
+        ] = defaultdict(lambda: defaultdict(list))
         team_observations: Counter = Counter()
+        period_team_observations: defaultdict[int, Counter] = defaultdict(Counter)
         model_classes: dict[str, str] = {}
         tracker_name = str(self.config.get("yolo_tracker", "bytetrack"))
         preview_artifacts: list[dict] = []
@@ -519,25 +525,157 @@ class MatchAnalysisRunner:
                         diagnostic_counts["duplicate_person_detections"] += int(
                             analysis.diagnostics.get("duplicate_person_detections", 0)
                         )
+                        period_counts = period_diagnostic_counts[period.number]
+                        period_counts["frames"] += 1
+                        period_counts["raw_athlete_detections"] += raw_athletes
+                        period_counts["athlete_observations"] += len(analysis.athletes)
+                        stage_values = {
+                            "detector_candidate_athletes": int(
+                                analysis.diagnostics.get(
+                                    "detector_candidate_athletes", raw_athletes
+                                )
+                            ),
+                            "tracker_input_athletes": int(
+                                analysis.diagnostics.get(
+                                    "tracker_input_athletes", raw_athletes
+                                )
+                            ),
+                            "tracker_output_athletes": int(
+                                analysis.diagnostics.get(
+                                    "tracker_output_athletes", len(analysis.athletes)
+                                )
+                            ),
+                            "detector_rescue_athletes": int(
+                                analysis.diagnostics.get("detector_rescue_athletes", 0)
+                            ),
+                            "native_identity_input_athletes": int(
+                                analysis.diagnostics.get(
+                                    "native_identity_input_athletes",
+                                    analysis.diagnostics.get(
+                                        "tracker_output_athletes",
+                                        len(analysis.athletes),
+                                    ),
+                                )
+                            ),
+                            "yolo_deduplicated_athletes": int(
+                                analysis.diagnostics.get(
+                                    "yolo_deduplicated_athletes", 0
+                                )
+                            ),
+                            "native_duplicates_removed": int(
+                                analysis.diagnostics.get(
+                                    "native_duplicates_removed", 0
+                                )
+                            ),
+                            "native_identity_births": int(
+                                analysis.diagnostics.get(
+                                    "native_identity_births", 0
+                                )
+                            ),
+                            "native_direct_assignments": int(
+                                analysis.diagnostics.get(
+                                    "native_direct_assignments", 0
+                                )
+                            ),
+                            "native_short_stitches": int(
+                                analysis.diagnostics.get(
+                                    "native_short_stitches", 0
+                                )
+                            ),
+                            "native_long_stitches": int(
+                                analysis.diagnostics.get(
+                                    "native_long_stitches", 0
+                                )
+                            ),
+                            "native_direct_rejections": int(
+                                analysis.diagnostics.get(
+                                    "native_direct_rejections", 0
+                                )
+                            ),
+                            "scene_cut_tracker_resets": int(
+                                bool(
+                                    analysis.diagnostics.get(
+                                        "scene_cut_tracker_reset", False
+                                    )
+                                )
+                            ),
+                        }
+                        for key, value in stage_values.items():
+                            diagnostic_counts[key] += value
+                            period_counts[key] += value
+                        frame_values = {
+                            "raw_athlete_detections": raw_athletes,
+                            "detector_candidate_athletes": stage_values[
+                                "detector_candidate_athletes"
+                            ],
+                            "tracker_input_athletes": stage_values[
+                                "tracker_input_athletes"
+                            ],
+                            "tracker_output_athletes": stage_values[
+                                "tracker_output_athletes"
+                            ],
+                            "detector_rescue_athletes": stage_values[
+                                "detector_rescue_athletes"
+                            ],
+                            "native_identity_input_athletes": stage_values[
+                                "native_identity_input_athletes"
+                            ],
+                            "athlete_observations": len(analysis.athletes),
+                        }
+                        for key, value in frame_values.items():
+                            diagnostic_frame_series[key].append(value)
+                            period_diagnostic_series[period.number][key].append(value)
+                        for reason, value in (
+                            analysis.diagnostics.get(
+                                "native_direct_rejection_reasons"
+                            )
+                            or {}
+                        ).items():
+                            reason_key = f"direct_rejection_{reason}"
+                            diagnostic_counts[reason_key] += int(value)
+                            period_counts[reason_key] += int(value)
+                        for confidence_band, value in (
+                            analysis.diagnostics.get("athlete_confidence_bins") or {}
+                        ).items():
+                            band_key = f"athlete_confidence_{confidence_band}"
+                            diagnostic_counts[band_key] += int(value)
+                            period_counts[band_key] += int(value)
+                        ball_reason = str(
+                            analysis.diagnostics.get("ball_selection_reason") or ""
+                        )
+                        if ball_reason:
+                            diagnostic_counts[f"ball_reason_{ball_reason}"] += 1
+                            period_counts[f"ball_reason_{ball_reason}"] += 1
                         model_classes.update(analysis.diagnostics.get("model_classes") or {})
                         tracker_name = str(
                             analysis.diagnostics.get("tracker") or tracker_name
                         )
-                        diagnostic_counts["ball_visible_frames"] += int(analysis.ball is not None)
+                        ball_visible = int(analysis.ball is not None)
+                        diagnostic_counts["ball_visible_frames"] += ball_visible
+                        period_counts["ball_visible_frames"] += ball_visible
+                        period_counts["raw_ball_detections"] += int(
+                            analysis.diagnostics.get("raw_ball_detections", 0)
+                        )
                         diagnostic_counts["pitch_metric_frames"] += int(
                             any(
                                 athlete.pitch_x is not None and athlete.pitch_y is not None
                                 for athlete in analysis.athletes
                             )
                         )
-                        diagnostic_counts["field_frames"] += int(
+                        field_live = int(
                             analysis.field_score >= 0.14
                             and not analysis.scene_cut
                             and analysis.replay_probability < 0.65
                         )
-                        diagnostic_counts[f"state_{str(sample.state)}"] += 1
+                        diagnostic_counts["field_frames"] += field_live
+                        period_counts["field_frames"] += field_live
+                        state_key = f"state_{str(sample.state)}"
+                        diagnostic_counts[state_key] += 1
+                        period_counts[state_key] += 1
                         for athlete in analysis.athletes:
-                            team_observations[athlete.team_key or "unknown"] += 1
+                            team_key = athlete.team_key or "unknown"
+                            team_observations[team_key] += 1
+                            period_team_observations[period.number][team_key] += 1
                         if (
                             self.analysis_mode in {"reference", "sample"}
                             and not preview_saved
@@ -757,6 +895,10 @@ class MatchAnalysisRunner:
             strict_validation=bool(
                 self.config.get("native_gsr_strict_validation", False)
             ),
+            frame_series=diagnostic_frame_series,
+            period_counts=period_diagnostic_counts,
+            period_frame_series=period_diagnostic_series,
+            period_team_observations=period_team_observations,
         )
         diagnostics["athlete_engine"] = athlete_engine
         diagnostics["gsr"] = {
@@ -1623,6 +1765,10 @@ class MatchAnalysisRunner:
         tracker_frame_rate: int = 0,
         team_calibration: dict | None = None,
         strict_validation: bool = False,
+        frame_series: dict[str, list[int]] | None = None,
+        period_counts: dict[int, Counter] | None = None,
+        period_frame_series: dict[int, dict[str, list[int]]] | None = None,
+        period_team_observations: dict[int, Counter] | None = None,
     ) -> dict:
         frames = max(int(counts["frames"]), 0)
         raw_athlete_observations = int(
@@ -1646,6 +1792,104 @@ class MatchAnalysisRunner:
             int(counts[f"state_{state}"])
             for state in ("controlled", "contested", "loose")
         )
+        frame_series = frame_series or {}
+        period_counts = period_counts or {}
+        period_frame_series = period_frame_series or {}
+        period_team_observations = period_team_observations or {}
+
+        def value(scope: Counter, key: str, fallback: int = 0) -> int:
+            return int(scope[key]) if key in scope else int(fallback)
+
+        def distribution(values: list[int]) -> dict[str, int]:
+            ordered = sorted(int(item) for item in values)
+            if not ordered:
+                return {"p10": 0, "median": 0, "p90": 0, "minimum": 0, "maximum": 0}
+
+            def percentile(ratio: float) -> int:
+                return ordered[int(round((len(ordered) - 1) * ratio))]
+
+            return {
+                "p10": percentile(0.10),
+                "median": percentile(0.50),
+                "p90": percentile(0.90),
+                "minimum": ordered[0],
+                "maximum": ordered[-1],
+            }
+
+        def stage_summary(
+            label: str,
+            scope: Counter,
+            series: dict[str, list[int]],
+            teams: Counter,
+        ) -> dict:
+            scope_frames = max(value(scope, "frames"), 1)
+            raw = value(scope, "raw_athlete_detections")
+            candidates = value(scope, "detector_candidate_athletes", raw)
+            tracker_input = value(scope, "tracker_input_athletes", raw)
+            tracker_output = value(
+                scope,
+                "tracker_output_athletes",
+                value(scope, "athlete_observations"),
+            )
+            rescued = value(scope, "detector_rescue_athletes")
+            identity_input = value(
+                scope,
+                "native_identity_input_athletes",
+                tracker_output + rescued,
+            )
+            final = value(scope, "athlete_observations")
+            known_teams = value(teams, "home") + value(teams, "away")
+            final_distribution = distribution(
+                list(series.get("athlete_observations") or [])
+            )
+            return {
+                "label": label,
+                "frames": value(scope, "frames"),
+                "raw_per_frame": round(raw / scope_frames, 2),
+                "candidates_per_frame": round(candidates / scope_frames, 2),
+                "tracker_input_per_frame": round(tracker_input / scope_frames, 2),
+                "tracker_output_per_frame": round(tracker_output / scope_frames, 2),
+                "rescued_per_frame": round(rescued / scope_frames, 2),
+                "identity_input_per_frame": round(identity_input / scope_frames, 2),
+                "final_per_frame": round(final / scope_frames, 2),
+                "dedup_keep_pct": round(100.0 * tracker_input / max(candidates, 1), 2),
+                "tracker_confirmation_pct": round(
+                    100.0 * tracker_output / max(tracker_input, 1), 2
+                ),
+                "identity_keep_pct": round(
+                    100.0 * final / max(identity_input, 1), 2
+                ),
+                "end_to_end_pct": round(100.0 * final / max(raw, 1), 2),
+                "empty_final_pct": round(
+                    100.0
+                    * sum(
+                        int(item == 0)
+                        for item in series.get("athlete_observations") or []
+                    )
+                    / scope_frames,
+                    2,
+                ),
+                "final_distribution": final_distribution,
+                "ball_visibility_pct": round(
+                    100.0 * value(scope, "ball_visible_frames") / scope_frames,
+                    2,
+                ),
+                "scene_cut_resets": value(scope, "scene_cut_tracker_resets"),
+                "identity_births": value(scope, "native_identity_births"),
+                "direct_rejections": value(scope, "native_direct_rejections"),
+                "short_stitches": value(scope, "native_short_stitches"),
+                "long_stitches": value(scope, "native_long_stitches"),
+                "known_team_pct": round(
+                    100.0 * known_teams / max(final, 1), 2
+                ),
+                "home_share_pct": round(
+                    100.0 * value(teams, "home") / max(known_teams, 1), 2
+                ),
+                "away_share_pct": round(
+                    100.0 * value(teams, "away") / max(known_teams, 1), 2
+                ),
+            }
+
         diagnostics = {
             "frames_analyzed": frames,
             "duration_seconds": round(tracking_duration_ms / 1_000, 1),
@@ -1695,6 +1939,59 @@ class MatchAnalysisRunner:
             "team_calibration": team_calibration or {},
             "issues": [],
         }
+        total_stage = stage_summary(
+            "Total", counts, frame_series, team_observations
+        )
+        stage_breakdown = [total_stage]
+        for period_number in sorted(period_counts):
+            stage_breakdown.append(
+                stage_summary(
+                    f"MT{period_number}",
+                    period_counts[period_number],
+                    period_frame_series.get(period_number, {}),
+                    period_team_observations.get(period_number, Counter()),
+                )
+            )
+        diagnostics["stage_breakdown"] = stage_breakdown
+        diagnostics["tracker_input_per_frame"] = total_stage[
+            "tracker_input_per_frame"
+        ]
+        diagnostics["tracker_output_per_frame"] = total_stage[
+            "tracker_output_per_frame"
+        ]
+        diagnostics["detector_rescue_per_frame"] = total_stage[
+            "rescued_per_frame"
+        ]
+        diagnostics["native_identity_input_per_frame"] = total_stage[
+            "identity_input_per_frame"
+        ]
+        diagnostics["tracker_confirmation_pct"] = total_stage[
+            "tracker_confirmation_pct"
+        ]
+        diagnostics["native_identity_keep_pct"] = total_stage[
+            "identity_keep_pct"
+        ]
+        diagnostics["empty_final_frames_pct"] = total_stage[
+            "empty_final_pct"
+        ]
+        diagnostics["final_player_distribution"] = total_stage[
+            "final_distribution"
+        ]
+        diagnostics["athlete_confidence_bins"] = {
+            "below_activation": value(
+                counts, "athlete_confidence_below_activation"
+            ),
+            "activation_to_strong": value(
+                counts, "athlete_confidence_activation_to_strong"
+            ),
+            "strong": value(counts, "athlete_confidence_strong"),
+        }
+        diagnostics["ball_selection_reasons"] = {
+            key.removeprefix("ball_reason_"): int(count)
+            for key, count in counts.items()
+            if key.startswith("ball_reason_")
+        }
+
         failures: list[str] = []
         warnings: list[str] = []
         if frames < 50:
@@ -1760,6 +2057,35 @@ class MatchAnalysisRunner:
                 )
             diagnostics["hard_blockers"] = hard_blockers
             failures.extend(hard_blockers)
+            diagnostics["identity_flow"] = {
+                "raw_scoped_ids": int(calibration.get("raw_tracks", 0)),
+                "raw_track_segments": int(
+                    calibration.get("raw_track_segments", 0)
+                ),
+                "canonical_births": int(
+                    calibration.get(
+                        "new_identity_observations",
+                        calibration.get("canonical_tracks", 0),
+                    )
+                ),
+                "direct_assignments": int(
+                    calibration.get("direct_assignments", 0)
+                ),
+                "short_stitches": int(calibration.get("short_stitches", 0)),
+                "long_stitches": int(calibration.get("long_stitches", 0)),
+                "direct_rejections": int(
+                    calibration.get("direct_track_rejections", 0)
+                ),
+                "direct_rejection_reasons": dict(
+                    calibration.get("direct_rejection_reasons") or {}
+                ),
+                "scene_cut_resets": int(
+                    calibration.get("scene_cut_tracker_resets", 0)
+                ),
+                "duplicates_removed": int(
+                    calibration.get("duplicates_removed", 0)
+                ),
+            }
         diagnostics["issues"] = failures + warnings
         diagnostics["verdict"] = "fail" if failures else ("warning" if warnings else "pass")
         return diagnostics

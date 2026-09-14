@@ -894,6 +894,125 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(diagnostics["average_tracked_athletes_per_frame"], 4.5)
         self.assertIn("tracker", " ".join(diagnostics["issues"]))
 
+    def test_diagnostics_exposes_stage_and_period_funnel(self):
+        counts = Counter(
+            {
+                "frames": 4,
+                "raw_athlete_detections": 40,
+                "detector_candidate_athletes": 48,
+                "tracker_input_athletes": 36,
+                "tracker_output_athletes": 24,
+                "detector_rescue_athletes": 8,
+                "native_identity_input_athletes": 32,
+                "athlete_observations": 28,
+                "ball_visible_frames": 2,
+                "field_frames": 4,
+                "state_controlled": 2,
+                "native_identity_births": 6,
+                "native_short_stitches": 3,
+            }
+        )
+        period_counts = {
+            1: Counter(
+                {
+                    "frames": 2,
+                    "raw_athlete_detections": 20,
+                    "detector_candidate_athletes": 24,
+                    "tracker_input_athletes": 18,
+                    "tracker_output_athletes": 12,
+                    "detector_rescue_athletes": 4,
+                    "native_identity_input_athletes": 16,
+                    "athlete_observations": 14,
+                    "ball_visible_frames": 1,
+                }
+            ),
+            2: Counter(
+                {
+                    "frames": 2,
+                    "raw_athlete_detections": 20,
+                    "detector_candidate_athletes": 24,
+                    "tracker_input_athletes": 18,
+                    "tracker_output_athletes": 12,
+                    "detector_rescue_athletes": 4,
+                    "native_identity_input_athletes": 16,
+                    "athlete_observations": 14,
+                    "ball_visible_frames": 1,
+                }
+            ),
+        }
+        diagnostics = MatchAnalysisRunner._tracking_diagnostics(
+            counts,
+            Counter({"home": 15, "away": 13}),
+            track_count=6,
+            tracking_duration_ms=120_000,
+            frame_series={"athlete_observations": [4, 6, 8, 10]},
+            period_counts=period_counts,
+            period_frame_series={
+                1: {"athlete_observations": [4, 10]},
+                2: {"athlete_observations": [6, 8]},
+            },
+            period_team_observations={
+                1: Counter({"home": 8, "away": 6}),
+                2: Counter({"home": 7, "away": 7}),
+            },
+        )
+
+        self.assertEqual(len(diagnostics["stage_breakdown"]), 3)
+        self.assertEqual(diagnostics["tracker_input_per_frame"], 9.0)
+        self.assertEqual(diagnostics["tracker_output_per_frame"], 6.0)
+        self.assertEqual(diagnostics["detector_rescue_per_frame"], 2.0)
+        self.assertEqual(diagnostics["native_identity_keep_pct"], 87.5)
+        self.assertEqual(
+            diagnostics["final_player_distribution"],
+            {"p10": 4, "median": 8, "p90": 10, "minimum": 4, "maximum": 10},
+        )
+
+    def test_native_gsr_rescues_only_unmatched_confident_players(self):
+        import numpy as np
+
+        provider = NativeGSRVisionProvider.__new__(NativeGSRVisionProvider)
+        provider.base = SimpleNamespace(confidence=0.18)
+        tracked = TrackedObject(
+            "athlete-1",
+            "player",
+            (20, 20, 45, 100),
+            0.9,
+            image_x=0.10,
+            image_y=0.55,
+        )
+        analysis = FrameAnalysis(
+            timestamp_ms=1_000,
+            width=320,
+            height=180,
+            field_score=0.8,
+            objects=[tracked],
+            diagnostics={
+                "raw_detections": [
+                    {
+                        "bbox": [20, 20, 45, 100],
+                        "role": "player",
+                        "confidence": 0.92,
+                    },
+                    {
+                        "bbox": [180, 25, 205, 105],
+                        "role": "player",
+                        "confidence": 0.75,
+                    },
+                    {
+                        "bbox": [260, 30, 284, 100],
+                        "role": "player",
+                        "confidence": 0.19,
+                    },
+                ]
+            },
+        )
+
+        rescued = provider._rescue_untracked_athletes(analysis)
+
+        self.assertEqual(len(rescued), 1)
+        self.assertEqual(rescued[0].metadata["tracking_source"], "detector_rescue")
+        self.assertEqual(rescued[0].bbox_xyxy, (180.0, 25.0, 205.0, 105.0))
+
     def test_native_gsr_reports_histogram_fallback_instead_of_claiming_deep_reid(self):
         diagnostics = MatchAnalysisRunner._tracking_diagnostics(
             Counter(

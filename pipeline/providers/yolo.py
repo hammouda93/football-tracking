@@ -253,6 +253,8 @@ class YoloVisionProvider(VisionProvider):
 
         height, width = frame.shape[:2]
         self.frame_index += 1
+        self.last_ball_selection_reason = ""
+        self.last_ball_field_support = 0.0
         inference_confidence = min(
             self.tracker_low_confidence,
             self.ball_confidence,
@@ -351,6 +353,11 @@ class YoloVisionProvider(VisionProvider):
         tracked_rows.extend(
             (box, confidence, class_id, int(tracker_id) + 1_000_000)
             for box, confidence, class_id, tracker_id in official_rows
+        )
+        tracker_output_athletes = sum(
+            self._role_for(int(class_id), names)
+            in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
+            for _box, _confidence, class_id, _tracker_id in tracked_rows
         )
 
         objects: list[TrackedObject] = []
@@ -467,6 +474,28 @@ class YoloVisionProvider(VisionProvider):
             scene_cut=scene_cut,
             replay_probability=0.72 if scene_cut and field_score < 0.2 else 0.0,
             diagnostics={
+                "detector_candidate_athletes": len(tracker_athlete_indices),
+                "tracker_input_athletes": len(trackable_athlete_indices),
+                "tracker_output_athletes": int(tracker_output_athletes),
+                "yolo_deduplicated_athletes": max(
+                    0, len(tracker_athlete_indices) - len(trackable_athlete_indices)
+                ),
+                "athlete_confidence_bins": {
+                    "below_activation": sum(
+                        self.tracker_low_confidence <= confidences[index]
+                        < self.tracker_new_confidence
+                        for index in raw_athlete_indices
+                    ),
+                    "activation_to_strong": sum(
+                        self.tracker_new_confidence <= confidences[index]
+                        < max(0.30, self.tracker_new_confidence)
+                        for index in raw_athlete_indices
+                    ),
+                    "strong": sum(
+                        confidences[index] >= max(0.30, self.tracker_new_confidence)
+                        for index in raw_athlete_indices
+                    ),
+                },
                 "raw_athlete_detections": sum(
                     roles[index] in {ObjectRole.PLAYER, ObjectRole.GOALKEEPER}
                     and confidences[index] >= self.confidence
@@ -535,6 +564,8 @@ class YoloVisionProvider(VisionProvider):
                 "image_size": self.image_size,
                 "detector_confidence": self.confidence,
                 "ball_confidence": self.ball_confidence,
+                "ball_selection_reason": self.last_ball_selection_reason,
+                "ball_field_support": round(self.last_ball_field_support, 4),
                 "ball_recovery": {
                     "enabled": self.ball_tiled_recovery,
                     "interval_frames": self.ball_recovery_interval_frames,

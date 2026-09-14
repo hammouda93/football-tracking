@@ -374,7 +374,15 @@ class NativeIdentityRefiner:
         self.global_reacquisitions = 0
         self.roster_resolutions = 0
         self.direct_track_rejections = 0
+        self.direct_rejection_reasons: Counter = Counter()
+        self.direct_assignments = 0
+        self.short_stitches = 0
+        self.long_stitches = 0
+        self.raw_track_segments = 0
+        self.new_identity_observations = 0
+        self.frames_without_people = 0
         self.cross_shot_pending = False
+        self._last_direct_rejection_reason = ""
 
     def reset_window(self, *, scene_cut: bool = False) -> None:
         """Reset the tracker namespace while preserving match identities."""
@@ -464,12 +472,13 @@ class NativeIdentityRefiner:
     ) -> bool:
         """Guard against an online tracker ID jumping to another person."""
 
+        self._last_direct_rejection_reason = ""
         gap_ms = timestamp_ms - state.last_timestamp_ms
-        if (
-            gap_ms <= 0
-            or gap_ms > self.max_gap_ms
-            or not self._same_role_family(state.role, obj.role)
-        ):
+        if gap_ms <= 0 or gap_ms > self.max_gap_ms:
+            self._last_direct_rejection_reason = "gap"
+            return False
+        if not self._same_role_family(state.role, obj.role):
+            self._last_direct_rejection_reason = "role"
             return False
         observed_team, observed_team_confidence = self._team_from_feature(
             team_feature
@@ -480,6 +489,7 @@ class NativeIdentityRefiner:
             and observed_team_confidence >= 0.55
             and state.team_label != observed_team
         ):
+            self._last_direct_rejection_reason = "team"
             return False
         if (
             state.jersey_number is not None
@@ -487,15 +497,20 @@ class NativeIdentityRefiner:
             and jersey_observation.confidence >= 0.75
             and state.jersey_number != jersey_observation.number
         ):
+            self._last_direct_rejection_reason = "jersey"
             return False
         if self._pitch_similarity(state, obj, gap_ms) == 0.0:
+            self._last_direct_rejection_reason = "pitch"
             return False
         appearance = _cosine(state.appearance, feature)
         motion = self._motion_similarity(state, obj, gap_ms)
         minimum_appearance = (
             0.30 if self.encoder.backend != "histogram" else 0.62
         )
-        return appearance >= minimum_appearance or motion >= 0.35
+        consistent = appearance >= minimum_appearance or motion >= 0.35
+        if not consistent:
+            self._last_direct_rejection_reason = "appearance_motion"
+        return consistent
 
     def _link_candidates(
         self,
@@ -527,9 +542,13 @@ class NativeIdentityRefiner:
                 ):
                     assignments[index] = (known_id, 1.0)
                     used_states.add(known_id)
+                    self.direct_assignments += 1
                     continue
                 self.raw_to_canonical.pop(raw_id, None)
                 self.direct_track_rejections += 1
+                self.direct_rejection_reasons[
+                    self._last_direct_rejection_reason or "unknown"
+                ] += 1
             for canonical_id, state in self.states.items():
                 gap_ms = timestamp_ms - state.last_timestamp_ms
                 if gap_ms <= 0 or gap_ms > self.global_max_gap_ms:
@@ -617,7 +636,10 @@ class NativeIdentityRefiner:
             used_states.add(canonical_id)
             self.fragments_stitched += 1
             if long_gap:
+                self.long_stitches += 1
                 self.global_reacquisitions += 1
+            else:
+                self.short_stitches += 1
         return assignments
 
     def _new_state(self, obj, feature, timestamp_ms: int) -> IdentityState:
@@ -632,6 +654,7 @@ class NativeIdentityRefiner:
             appearance=feature.copy(),
         )
         self.states[canonical_id] = state
+        self.new_identity_observations += 1
         return state
 
     def _update_state(
@@ -780,6 +803,7 @@ class NativeIdentityRefiner:
         people = [obj for obj in objects if obj.role in PERSON_ROLES]
         passthrough = [obj for obj in objects if obj.role not in PERSON_ROLES]
         if not people:
+            self.frames_without_people += 1
             return objects
         boxes = [tuple(obj.bbox_xyxy) for obj in people]
         features = self.encoder.encode(frame, boxes)
@@ -832,7 +856,10 @@ class NativeIdentityRefiner:
             zip(people, features, team_features, jersey_observations)
         ):
             raw_id = str(obj.track_id)
-            self.raw_tracks_seen.add(raw_id)
+            scoped_raw_id = f"w{self.window_index}:{raw_id}"
+            self.raw_tracks_seen.add(scoped_raw_id)
+            if raw_id not in self.raw_to_canonical:
+                self.raw_track_segments += 1
             assignment = assignments.get(index)
             if assignment is None:
                 state = self._new_state(obj, feature, timestamp_ms)
@@ -849,6 +876,8 @@ class NativeIdentityRefiner:
                 jersey_observation,
                 timestamp_ms,
             )
+            state.raw_track_ids.discard(raw_id)
+            state.raw_track_ids.add(scoped_raw_id)
             state_by_index[index] = (state, reid_confidence)
 
         self._fit_team_clusters()
@@ -901,6 +930,13 @@ class NativeIdentityRefiner:
             "global_reacquisitions": self.global_reacquisitions,
             "duplicates_removed": self.duplicates_removed,
             "direct_track_rejections": self.direct_track_rejections,
+            "direct_rejection_reasons": dict(self.direct_rejection_reasons),
+            "direct_assignments": self.direct_assignments,
+            "short_stitches": self.short_stitches,
+            "long_stitches": self.long_stitches,
+            "raw_track_segments": self.raw_track_segments,
+            "new_identity_observations": self.new_identity_observations,
+            "frames_without_people": self.frames_without_people,
             "team_tracklets": sum(
                 state.mean_team_feature is not None for state in self.states.values()
             ),
