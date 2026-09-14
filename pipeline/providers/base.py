@@ -25,4 +25,8 @@ def build_provider(name: str, **config: Any) -> VisionProvider:
         from .yolo import YoloVisionProvider
 
         return YoloVisionProvider(**config)
+    if normalized == "native_gsr":
+        from .native_gsr import NativeGSRVisionProvider
+
+        return NativeGSRVisionProvider(**config)
     raise ValueError(f"Backend d’analyse inconnu : {name}")

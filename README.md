@@ -14,6 +14,9 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 - Compensation pan/tilt/zoom par ORB, RANSAC et homographies par plan caméra.
 - Projection métrique 105 × 68 m lorsque quatre points terrain ou plus sont fournis.
 - Backend YOLO + BoT-SORT/ByteTrack local toujours disponible.
+- Profil `native_gsr` entièrement Windows : ByteTrack, dédoublonnage des
+  personnes, apparence agrégée par tracklet, liaison prudente des fragments et
+  équipes apprises dans la vidéo. Il ne dépend pas de WSL.
 - Adaptateur GSR versionné pour TrackLab + `sn-gamestate` ou le moteur
   SoccernetGSR Winner 2025, exécutés dans un environnement GPU séparé.
 - Fusion des athlètes GSR (ReID, rôle, équipe, maillot, terrain) avec le
@@ -35,8 +38,7 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 flowchart TD
     A["Vidéo complète"] --> B["Qualité + périodes"]
     B --> C["Moteur athlètes · local ou GSR"]
-    C --> I["Test court · 8 × 5 s"]
-    I --> D["Validation · 2 × 60 s"]
+    C --> D["Validation · 2 × 60 s continues"]
     D --> E{"Détections fiables ?"}
     E -->|Non| F["Corriger modèle + correspondance A/B"]
     E -->|Oui| G["Analyse complète"]
@@ -45,10 +47,13 @@ flowchart TD
 
 Le détail des décisions techniques et des limites est dans
 [docs/architecture.md](docs/architecture.md). La passerelle professionnelle est
-documentée dans [docs/gsr-integration.md](docs/gsr-integration.md).
+documentée dans [docs/gsr-integration.md](docs/gsr-integration.md). Le moteur
+Windows inspiré de ces travaux est décrit dans
+[docs/native-gsr-windows.md](docs/native-gsr-windows.md).
 
-Pour installer et activer le vrai pipeline officiel TrackLab + sn-gamestate
-dans un environnement WSL2 séparé, sans toucher au `.venv` Django :
+Le profil `native_gsr` fonctionne directement sous Windows. L'installation WSL
+ci-dessous ne concerne que l'exécution inchangée du pipeline officiel TrackLab
++ sn-gamestate et reste facultative :
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
@@ -117,10 +122,9 @@ Le serveur Django et le worker sont volontairement séparés : l’interface res
    la vision apprend les maillots directement sur les joueurs détectés.
 2. Importer chaque effectif en CSV (`name,shirt_number,position`).
 3. Cliquer sur **1. Détecter/recalculer les mi-temps**. La coupure centrale est proposée automatiquement ; vérifier puis confirmer les quatre limites vidéo modifiables.
-4. Lancer **2a. Test court · 40 s**. Il contrôle huit séquences de 5 secondes réparties dans les deux mi-temps. Chaque aperçu compare la sortie du moteur à gauche et les objets réellement utilisés à droite.
-5. Vérifier que groupe A/B correspond aux bons clubs ; utiliser **Inverser les
-   équipes A/B** si les noms sont retournés, puis relancer la référence.
-6. Lancer ensuite **2b. Test de validation · 2 min**. Il applique exactement le même moteur sur deux séquences continues de 60 secondes, une par mi-temps, et mesure le ballon visible, les joueurs par image, l’équilibre des équipes et la fragmentation des pistes. Ces deux tests affichent le tracking dans la page et dans une fenêtre OpenCV fluide sous Windows. `ESC` annule le test.
+4. Lancer **2. Test · 2 min (1 min/MT)**. Il applique exactement le moteur du match complet sur deux séquences continues de 60 secondes : une au centre de la MT1, puis une au centre de la MT2. Le live affiche uniquement les objets finaux afin qu’un joueur n’ait pas deux boîtes visuelles. Dans la fenêtre OpenCV, `D` affiche ou masque les détections YOLO brutes et `ESC` annule le test.
+5. Vérifier la couverture joueurs, la stabilité des IDs, groupe A/B, gardiens, arbitres, OCR et ballon. Utiliser **Inverser les équipes A/B** si les noms sont retournés, puis relancer ce même test de 2 minutes.
+6. Télécharger la pré-annotation CSV et la corriger si une mesure IDF1/HOTA objective est souhaitée.
 7. Ne lancer **3. Analyse complète** que si le test de 2 minutes est validé. Le bouton reste verrouillé si le socle visuel échoue.
 8. Dans **Identités**, rattacher les pistes au bon joueur lorsque le numéro n’est pas lisible.
 9. Valider ou corriger les actions en regardant le clip ou le timecode, puis exporter les résultats.
@@ -145,10 +149,11 @@ Les valeurs se trouvent dans `.env` :
 | `ANALYSIS_MIN_YOLO_TRACKING_FPS` | `12.5` | Cadence du profil de référence, équivalente à une image sur deux à 25 FPS |
 | `ANALYSIS_DEVICE` | `cpu` | `cpu`, `0`, `cuda:0`, selon Ultralytics |
 | `ANALYSIS_LIVE_WINDOW` | `1` sous Windows | Fenêtre OpenCV fluide pendant les tests courts |
-| `YOLO_PROFILE` | `main_py` | `main_py` reproduit le prototype validé ; `advanced` réactive les réglages indépendants |
+| `YOLO_PROFILE` | `main_py` | `native_gsr` active le moteur Windows consolidé ; `main_py` conserve le témoin historique ; `advanced` expose les réglages bruts |
 | `YOLO_MODEL_PATH` | `models/football-players.pt` | Poids locaux |
 | `YOLO_CONFIDENCE` | `0.30` | Seuil de détection |
 | `YOLO_BALL_CONFIDENCE` | `0.12` | Seuil séparé du petit ballon ; les joueurs restent à `0.30` |
+| `YOLO_BALL_TILED_RECOVERY` | `1` en Native GSR | Récupération périodique du petit ballon par tuiles |
 | `YOLO_IMAGE_SIZE` | `640` | Résolution d’inférence du prototype `main.py` |
 | `YOLO_TRACKER` | `bytetrack` | Profil historique qui conserve le mieux les joueurs ; `botsort` reste disponible |
 | `YOLO_TRACK_LOW_CONFIDENCE` | `0.30` | Seuil réellement envoyé à ByteTrack dans le profil de référence |
@@ -159,6 +164,12 @@ Les valeurs se trouvent dans `.env` :
 | `YOLO_GOALKEEPER_CLASS_IDS` | `1` | IDs numériques des classes gardien |
 | `YOLO_REFEREE_CLASS_IDS` | `3` | IDs numériques des classes arbitre |
 | `YOLO_BALL_CLASS_IDS` | `0` | IDs numériques des classes ballon |
+| `NATIVE_GSR_REID_MODEL_PATH` | vide | Checkpoint OSNet/ONNX d'embeddings ; le script Windows installe OSNet x0.25 |
+| `NATIVE_GSR_MAX_GAP_SECONDS` | `3.0` | Intervalle maximal pour réunir deux fragments compatibles |
+| `NATIVE_GSR_JERSEY_ENGINE` | `auto` | EasyOCR ou classifieur ONNX 0..99, avec vote temporel |
+| `NATIVE_GSR_PITCH_MODEL_PATH` | vide | Checkpoint ONNX de points terrain compatible |
+| `NATIVE_GSR_PITCH_SCHEMA_PATH` | vide | Schéma sémantique exact des 97 sorties du checkpoint |
+| `NATIVE_GSR_STRICT_VALIDATION` | `1` | Bloque la validation si Re-ID/OCR/roster/terrain manquent |
 | `GSR_RUNNER_COMMAND_JSON` | `[]` | Commande argv JSON du sidecar TrackLab/Winner ; aucun shell implicite |
 | `GSR_PRECOMPUTED_RESULT` | vide | Résultat GSR v1 déjà calculé, utile pour répéter les tests sans GPU |
 | `GSR_TIMEOUT_SECONDS` | `43200` | Délai maximal du processus GSR externe |

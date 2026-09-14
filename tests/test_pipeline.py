@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
 from collections import Counter
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from pipeline.ball_in_play import BallInPlayEngine
 from pipeline.events import EventEngine
+from pipeline.evaluation import evaluate_tracking, validate_ground_truth
+from pipeline.jersey import JerseyNumberRecognizer, JerseyObservation, WeightedNumberVote
 from pipeline.periods import PeriodDetector
+from pipeline.pitch import NativePitchCalibrator, PitchLandmark, load_pitch_landmarks
 from pipeline.providers.yolo import YoloVisionProvider
+from pipeline.providers.native_gsr import NativeGSRVisionProvider
+from pipeline.providers.native_identity import NativeAppearanceEncoder, NativeIdentityRefiner
 from pipeline.stats import StatsAggregator
 from pipeline.runner import MatchAnalysisRunner
 from pipeline.types import (
@@ -370,9 +376,13 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual([item.track_id for item in kept], ["athlete-2", "athlete-3"])
 
     def test_ball_selection_rejects_isolated_false_positive(self):
+        import numpy as np
+
         provider = YoloVisionProvider.__new__(YoloVisionProvider)
         provider.previous_ball_center = None
         provider.previous_ball_timestamp_ms = None
+        provider.ball_confidence = 0.12
+        frame = np.full((720, 1280, 3), (45, 145, 45), dtype=np.uint8)
         player = TrackedObject(
             "athlete-1", "player", (100, 100, 150, 250), 0.90
         )
@@ -382,11 +392,56 @@ class VideoSamplingTests(unittest.TestCase):
         selected = provider._select_ball(
             [isolated, near_player],
             [player],
-            (720, 1280, 3),
+            frame,
             10_000,
         )
 
         self.assertEqual(selected, near_player)
+        self.assertIn("near_player", provider.last_ball_selection_reason)
+
+    def test_ball_selection_accepts_unique_loose_ball_on_the_pitch(self):
+        import numpy as np
+
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.previous_ball_center = None
+        provider.previous_ball_timestamp_ms = None
+        provider.ball_confidence = 0.12
+        frame = np.full((720, 1280, 3), (45, 145, 45), dtype=np.uint8)
+        loose_ball = ((620, 330, 629, 339), 0.24)
+
+        selected = provider._select_ball([loose_ball], [], frame, 10_000)
+
+        self.assertEqual(selected, loose_ball)
+        self.assertEqual(provider.last_ball_selection_reason, "field_only")
+        self.assertGreater(provider.last_ball_field_support, 0.80)
+
+    def test_ball_selection_rejects_loose_candidate_away_from_pitch(self):
+        import numpy as np
+
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.previous_ball_center = None
+        provider.previous_ball_timestamp_ms = None
+        provider.ball_confidence = 0.12
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        logo_candidate = ((620, 330, 629, 339), 0.92)
+
+        selected = provider._select_ball([logo_candidate], [], frame, 10_000)
+
+        self.assertIsNone(selected)
+
+    def test_ball_geometry_rejects_large_field_mark(self):
+        self.assertFalse(
+            YoloVisionProvider._valid_ball_geometry(
+                (100, 100, 140, 140),
+                (720, 1280, 3),
+            )
+        )
+        self.assertTrue(
+            YoloVisionProvider._valid_ball_geometry(
+                (100, 100, 110, 110),
+                (720, 1280, 3),
+            )
+        )
 
     def test_team_codes_use_club_initials(self):
         self.assertEqual(
@@ -495,12 +550,221 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(diagnostics["source"], "video_only")
         self.assertEqual(diagnostics["home_group"], "B")
 
+    def test_native_gsr_removes_duplicate_person_boxes(self):
+        import cv2
+        import numpy as np
+
+        frame = np.full((180, 320, 3), (45, 145, 45), dtype=np.uint8)
+        cv2.rectangle(frame, (80, 25), (120, 150), (30, 30, 190), -1)
+        objects = [
+            TrackedObject("raw-1", "player", (80, 25, 120, 150), 0.91),
+            TrackedObject("raw-2", "player", (82, 30, 122, 150), 0.72),
+        ]
+        refiner = NativeIdentityRefiner(home_team_cluster="B")
+
+        refined = refiner.process(frame, objects, 1_000)
+
+        self.assertEqual(len(refined), 1)
+        self.assertEqual(refined[0].confidence, 0.91)
+        self.assertEqual(refiner.diagnostics()["duplicates_removed"], 1)
+
+    def test_native_gsr_rejects_tracker_id_after_strong_team_switch(self):
+        import numpy as np
+
+        refiner = NativeIdentityRefiner(home_team_cluster="A")
+        first = TrackedObject("raw-1", "player", (80, 25, 120, 150), 0.91)
+        state = refiner._new_state(first, np.asarray([1.0, 0.0]), 1_000)
+        state.team_label = "home"
+        refiner.raw_to_canonical["raw-1"] = state.canonical_id
+        refiner.team_centers = np.asarray(
+            [
+                np.zeros(8, dtype=np.float32),
+                np.ones(8, dtype=np.float32),
+            ]
+        )
+        switched = TrackedObject("raw-1", "player", (82, 25, 122, 150), 0.90)
+
+        assignments = refiner._link_candidates(
+            [switched],
+            [np.asarray([1.0, 0.0])],
+            [np.ones(8, dtype=np.float32)],
+            [None],
+            1_080,
+        )
+
+        self.assertEqual(assignments, {})
+        self.assertEqual(refiner.direct_track_rejections, 1)
+
+    def test_native_gsr_stitches_a_conservative_tracker_fragment(self):
+        import cv2
+        import numpy as np
+
+        frame = np.full((180, 320, 3), (45, 145, 45), dtype=np.uint8)
+        cv2.rectangle(frame, (80, 25), (120, 150), (30, 30, 190), -1)
+        refiner = NativeIdentityRefiner(home_team_cluster="B")
+        first = refiner.process(
+            frame,
+            [TrackedObject("raw-1", "player", (80, 25, 120, 150), 0.91)],
+            1_000,
+        )[0]
+        second = refiner.process(
+            frame,
+            [TrackedObject("raw-99", "player", (82, 25, 122, 150), 0.89)],
+            1_080,
+        )[0]
+
+        self.assertEqual(first.track_id, second.track_id)
+        self.assertEqual(refiner.diagnostics()["fragments_stitched"], 1)
+        self.assertEqual(refiner.diagnostics()["canonical_tracks"], 1)
+
+    def test_native_gsr_learns_teams_from_tracklet_torsos(self):
+        import cv2
+        import numpy as np
+
+        frame = np.full((220, 640, 3), (45, 145, 45), dtype=np.uint8)
+        boxes = []
+        for index in range(6):
+            x = 20 + index * 48
+            box = (x, 30, x + 28, 180)
+            boxes.append((box, "red", f"red-{index}"))
+            cv2.rectangle(frame, (x, 30), (x + 28, 180), (25, 25, 190), -1)
+        for index in range(6):
+            x = 340 + index * 48
+            box = (x, 30, x + 28, 180)
+            boxes.append((box, "white", f"white-{index}"))
+            cv2.rectangle(frame, (x, 30), (x + 28, 180), (240, 240, 240), -1)
+
+        refiner = NativeIdentityRefiner(home_team_cluster="B")
+        refined = []
+        # Three observations calibrate the two video-only jersey clusters, then
+        # three stable votes deliberately lock each tracklet to one team.
+        for frame_index in range(6):
+            refined = refiner.process(
+                frame,
+                [
+                    TrackedObject(raw_id, "player", box, 0.9)
+                    for box, _colour, raw_id in boxes
+                ],
+                1_000 + frame_index * 80,
+            )
+
+        teams = {
+            raw_id: obj.team_key
+            for (_box, _colour, raw_id), obj in zip(boxes, refined)
+        }
+        self.assertTrue(all(teams[f"red-{index}"] == "home" for index in range(6)))
+        self.assertTrue(all(teams[f"white-{index}"] == "away" for index in range(6)))
+        diagnostics = refiner.diagnostics()
+        self.assertEqual(diagnostics["status"], "ready")
+        self.assertEqual(diagnostics["source"], "video_only")
+        self.assertEqual(diagnostics["team_tracklets"], 12)
+
+    def test_native_gsr_preserves_global_state_when_tracker_window_resets(self):
+        import cv2
+        import numpy as np
+
+        frame = np.full((180, 320, 3), (45, 145, 45), dtype=np.uint8)
+        cv2.rectangle(frame, (80, 25), (120, 150), (30, 30, 190), -1)
+        refiner = NativeIdentityRefiner(home_team_cluster="B")
+        first = refiner.process(
+            frame,
+            [TrackedObject("raw-1", "player", (80, 25, 120, 150), 0.91)],
+            1_000,
+        )[0]
+
+        refiner.reset_window()
+        second = refiner.process(
+            frame,
+            [TrackedObject("raw-1", "player", (82, 25, 122, 150), 0.91)],
+            1_080,
+        )[0]
+
+        self.assertEqual(first.track_id, second.track_id)
+        self.assertEqual(refiner.diagnostics()["canonical_tracks"], 1)
+        self.assertEqual(refiner.diagnostics()["windows"], 1)
+
+    def test_native_gsr_votes_jersey_then_resolves_unique_roster_player(self):
+        import numpy as np
+
+        class FakeJersey:
+            model = object()
+            backend = "fake_ocr"
+
+            @staticmethod
+            def recognize(_frame, _box):
+                return JerseyObservation(10, 0.95, "fake_ocr")
+
+            @staticmethod
+            def diagnostics():
+                return {
+                    "backend": "fake_ocr",
+                    "ready": True,
+                    "eligible_crops": 3,
+                }
+
+        frame = np.full((180, 320, 3), (45, 145, 45), dtype=np.uint8)
+        refiner = NativeIdentityRefiner(
+            roster=[
+                {
+                    "id": 7,
+                    "team_key": "home",
+                    "shirt_number": 10,
+                    "name": "Joueur Test",
+                }
+            ],
+            jersey_interval_frames=1,
+        )
+        refiner.jersey = FakeJersey()
+        refined = None
+        for frame_index in range(4):
+            refined = refiner.process(
+                frame,
+                [TrackedObject("raw-1", "player", (80, 25, 120, 150), 0.91)],
+                1_000 + frame_index * 80,
+            )[0]
+
+        self.assertEqual(refined.shirt_number, 10)
+        self.assertEqual(refined.metadata["roster_player_id"], 7)
+        self.assertEqual(refined.metadata["roster_player_name"], "Joueur Test")
+
+    def test_match_scoped_native_identity_is_not_prefixed_per_window(self):
+        class Camera:
+            @staticmethod
+            def stabilize_point(x, y):
+                return x, y
+
+        analysis = FrameAnalysis(
+            1_000,
+            320,
+            180,
+            0.8,
+            [
+                TrackedObject(
+                    "native-9",
+                    "player",
+                    (80, 25, 120, 150),
+                    0.91,
+                    image_x=0.3125,
+                    image_y=0.8333,
+                    metadata={"identity_scope": "match"},
+                )
+            ],
+        )
+        runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
+        summaries = {}
+
+        runner._normalize_objects(analysis, Camera(), None, "p2-w4-", summaries)
+
+        self.assertEqual(analysis.objects[0].track_id, "native-9")
+        self.assertIn("native-9", summaries)
+
     def test_native_live_window_draws_without_changing_analysis(self):
         import numpy as np
 
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {"analysis_mode": "sample"}
         runner._live_track_history = {}
+        runner._live_debug_overlay = False
         analysis = FrameAnalysis(
             timestamp_ms=18_000,
             width=320,
@@ -522,7 +786,7 @@ class VideoSamplingTests(unittest.TestCase):
                 "team_calibration": {"status": "ready", "samples": 20},
             },
         )
-        with patch("cv2.imshow"), patch("cv2.waitKey", return_value=0):
+        with patch("cv2.imshow"), patch("cv2.waitKey", return_value=ord("d")):
             visible = runner._show_live_tracking(
                 np.zeros((180, 320, 3), dtype=np.uint8),
                 analysis,
@@ -530,11 +794,12 @@ class VideoSamplingTests(unittest.TestCase):
                 total_ms=120_000,
                 period_number=1,
                 window_index=1,
-                window_count=8,
+                window_count=2,
                 team_labels={"home": "ST (T1)", "away": "CSS (T2)"},
             )
 
         self.assertTrue(visible)
+        self.assertTrue(runner._live_debug_overlay)
         self.assertEqual(len(analysis.objects), 1)
 
     def test_reference_uses_eight_five_second_windows_across_both_halves(self):
@@ -558,7 +823,7 @@ class VideoSamplingTests(unittest.TestCase):
             [1, 1, 1, 1, 2, 2, 2, 2],
         )
 
-    def test_validation_sample_keeps_two_minutes_across_both_halves(self):
+    def test_validation_sample_uses_one_continuous_minute_per_half(self):
         runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
         runner.config = {
             "analysis_mode": "sample",
@@ -576,6 +841,14 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(
             sum(item["end_ms"] - item["start_ms"] for item in windows),
             120_000,
+        )
+        self.assertEqual(
+            [item["end_ms"] - item["start_ms"] for item in windows],
+            [60_000, 60_000],
+        )
+        self.assertEqual(
+            [item["period"].number for item in windows],
+            [1, 2],
         )
 
     def test_diagnostics_fail_bad_ball_team_and_track_detection(self):
@@ -620,6 +893,421 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(diagnostics["average_player_detections_per_frame"], 11.0)
         self.assertEqual(diagnostics["average_tracked_athletes_per_frame"], 4.5)
         self.assertIn("tracker", " ".join(diagnostics["issues"]))
+
+    def test_diagnostics_exposes_stage_and_period_funnel(self):
+        counts = Counter(
+            {
+                "frames": 4,
+                "raw_athlete_detections": 40,
+                "detector_candidate_athletes": 48,
+                "tracker_input_athletes": 36,
+                "tracker_output_athletes": 24,
+                "detector_rescue_athletes": 8,
+                "native_identity_input_athletes": 32,
+                "athlete_observations": 28,
+                "ball_visible_frames": 2,
+                "field_frames": 4,
+                "state_controlled": 2,
+                "native_identity_births": 6,
+                "native_short_stitches": 3,
+            }
+        )
+        period_counts = {
+            1: Counter(
+                {
+                    "frames": 2,
+                    "raw_athlete_detections": 20,
+                    "detector_candidate_athletes": 24,
+                    "tracker_input_athletes": 18,
+                    "tracker_output_athletes": 12,
+                    "detector_rescue_athletes": 4,
+                    "native_identity_input_athletes": 16,
+                    "athlete_observations": 14,
+                    "ball_visible_frames": 1,
+                }
+            ),
+            2: Counter(
+                {
+                    "frames": 2,
+                    "raw_athlete_detections": 20,
+                    "detector_candidate_athletes": 24,
+                    "tracker_input_athletes": 18,
+                    "tracker_output_athletes": 12,
+                    "detector_rescue_athletes": 4,
+                    "native_identity_input_athletes": 16,
+                    "athlete_observations": 14,
+                    "ball_visible_frames": 1,
+                }
+            ),
+        }
+        diagnostics = MatchAnalysisRunner._tracking_diagnostics(
+            counts,
+            Counter({"home": 15, "away": 13}),
+            track_count=6,
+            tracking_duration_ms=120_000,
+            frame_series={"athlete_observations": [4, 6, 8, 10]},
+            period_counts=period_counts,
+            period_frame_series={
+                1: {"athlete_observations": [4, 10]},
+                2: {"athlete_observations": [6, 8]},
+            },
+            period_team_observations={
+                1: Counter({"home": 8, "away": 6}),
+                2: Counter({"home": 7, "away": 7}),
+            },
+        )
+
+        self.assertEqual(len(diagnostics["stage_breakdown"]), 3)
+        self.assertEqual(diagnostics["tracker_input_per_frame"], 9.0)
+        self.assertEqual(diagnostics["tracker_output_per_frame"], 6.0)
+        self.assertEqual(diagnostics["detector_rescue_per_frame"], 2.0)
+        self.assertEqual(diagnostics["native_identity_keep_pct"], 87.5)
+        self.assertEqual(
+            diagnostics["final_player_distribution"],
+            {"p10": 4, "median": 8, "p90": 10, "minimum": 4, "maximum": 10},
+        )
+
+    def test_native_gsr_rescues_only_unmatched_confident_players(self):
+        import numpy as np
+
+        provider = NativeGSRVisionProvider.__new__(NativeGSRVisionProvider)
+        provider.base = SimpleNamespace(confidence=0.18)
+        tracked = TrackedObject(
+            "athlete-1",
+            "player",
+            (20, 20, 45, 100),
+            0.9,
+            image_x=0.10,
+            image_y=0.55,
+        )
+        analysis = FrameAnalysis(
+            timestamp_ms=1_000,
+            width=320,
+            height=180,
+            field_score=0.8,
+            objects=[tracked],
+            diagnostics={
+                "raw_detections": [
+                    {
+                        "bbox": [20, 20, 45, 100],
+                        "role": "player",
+                        "confidence": 0.92,
+                    },
+                    {
+                        "bbox": [180, 25, 205, 105],
+                        "role": "player",
+                        "confidence": 0.75,
+                    },
+                    {
+                        "bbox": [260, 30, 284, 100],
+                        "role": "player",
+                        "confidence": 0.19,
+                    },
+                ]
+            },
+        )
+
+        rescued = provider._rescue_untracked_athletes(analysis)
+
+        self.assertEqual(len(rescued), 1)
+        self.assertEqual(rescued[0].metadata["tracking_source"], "detector_rescue")
+        self.assertEqual(rescued[0].bbox_xyxy, (180.0, 25.0, 205.0, 105.0))
+
+    def test_native_gsr_reports_histogram_fallback_instead_of_claiming_deep_reid(self):
+        diagnostics = MatchAnalysisRunner._tracking_diagnostics(
+            Counter(
+                {
+                    "frames": 100,
+                    "raw_athlete_detections": 1_000,
+                    "athlete_observations": 1_000,
+                    "ball_visible_frames": 50,
+                    "field_frames": 100,
+                    "state_controlled": 50,
+                }
+            ),
+            Counter({"home": 500, "away": 500}),
+            track_count=20,
+            tracking_duration_ms=120_000,
+            profile_name="native_gsr",
+            team_calibration={
+                "status": "ready",
+                "appearance_backend": "histogram",
+                "appearance_error": "",
+            },
+        )
+
+        self.assertEqual(diagnostics["verdict"], "warning")
+        self.assertIn("Re-ID profond", " ".join(diagnostics["issues"]))
+
+    def test_pth_reid_uses_bundled_osnet_without_torchreid_package(self):
+        fake_module = ModuleType("pipeline.providers.osnet")
+
+        class FakeExtractor:
+            def __init__(self, model_path, device):
+                self.model_path = model_path
+                self.device = device
+
+        fake_module.OSNetFeatureExtractor = FakeExtractor
+        with tempfile.NamedTemporaryFile(suffix=".pth") as checkpoint:
+            with patch.dict(sys.modules, {"pipeline.providers.osnet": fake_module}):
+                encoder = NativeAppearanceEncoder(
+                    checkpoint.name,
+                    "0",
+                    backend="osnet",
+                    model_name="osnet_x0_25",
+                )
+
+        self.assertEqual(encoder.model_kind, "osnet")
+        self.assertEqual(encoder.backend, "native_osnet_x0_25")
+        self.assertEqual(encoder.model.device, "0")
+
+    @patch("pipeline.runner.build_provider")
+    def test_native_gsr_profile_selects_native_windows_provider(self, build_provider):
+        runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
+        runner.config = {"yolo_profile": "native_gsr"}
+
+        runner._build_legacy_provider("yolo", "cpu", 12.5)
+
+        self.assertEqual(build_provider.call_args.args[0], "native_gsr")
+        self.assertEqual(build_provider.call_args.kwargs["profile"], "native_gsr")
+
+    @patch("pipeline.runner.build_provider")
+    def test_external_gsr_ball_only_keeps_plain_yolo_provider(self, build_provider):
+        runner = MatchAnalysisRunner.__new__(MatchAnalysisRunner)
+        runner.config = {"yolo_profile": "native_gsr", "yolo_ball_class_ids": [0]}
+
+        runner._build_legacy_provider("yolo", "cpu", 12.5, ball_only=True)
+
+        self.assertEqual(build_provider.call_args.args[0], "yolo")
+        self.assertEqual(build_provider.call_args.kwargs["player_class_ids"], [])
+
+    def test_native_gsr_detects_hard_broadcast_cut(self):
+        import numpy as np
+
+        provider = NativeGSRVisionProvider.__new__(NativeGSRVisionProvider)
+        provider.previous_scene_gray = None
+        first = np.zeros((180, 320, 3), dtype=np.uint8)
+        second = np.full((180, 320, 3), 255, dtype=np.uint8)
+
+        self.assertFalse(provider._detect_scene_cut(first))
+        self.assertTrue(provider._detect_scene_cut(second))
+
+    def test_native_gsr_retries_at_lower_resolution_after_memory_error(self):
+        class MemoryLimitedBase:
+            image_size = 1280
+
+            def __init__(self):
+                self.calls = 0
+
+            def analyze_frame(self, _frame, timestamp_ms):
+                self.calls += 1
+                if self.calls == 1:
+                    raise RuntimeError("CUDA out of memory")
+                return FrameAnalysis(timestamp_ms, 320, 180, 0.8, [])
+
+        class IdentityPassthrough:
+            @staticmethod
+            def process(_frame, objects, _timestamp_ms):
+                return objects
+
+            @staticmethod
+            def diagnostics():
+                return {"status": "collecting"}
+
+        provider = NativeGSRVisionProvider.__new__(NativeGSRVisionProvider)
+        provider.base = MemoryLimitedBase()
+        provider.refiner = IdentityPassthrough()
+        provider.profile = "native_gsr"
+        provider.tracker_name = "botsort+native_reid"
+        provider.image_size = 1280
+        provider.adaptive_resizes = []
+
+        analysis = provider.analyze_frame(None, 1_000)
+
+        self.assertEqual(provider.base.calls, 2)
+        self.assertEqual(provider.image_size, 960)
+        self.assertEqual(analysis.diagnostics["image_size"], 960)
+        self.assertEqual(
+            analysis.diagnostics["adaptive_image_resizes"],
+            [{"from": 1280, "to": 960}],
+        )
+
+
+class NativeGSRModuleTests(unittest.TestCase):
+    def test_weighted_jersey_vote_requires_repeated_distinct_reads(self):
+        vote = WeightedNumberVote()
+        vote.add(10, 0.95, 1_000)
+        self.assertIsNone(vote.result()[0])
+        vote.add(10, 0.90, 1_100)
+        vote.add(10, 0.92, 1_200)
+        vote.add(17, 0.25, 1_300)
+
+        number, confidence = vote.result()
+
+        self.assertEqual(number, 10)
+        self.assertGreater(confidence, 0.75)
+
+    def test_jersey_parser_rejects_words_and_more_than_two_digits(self):
+        self.assertEqual(JerseyNumberRecognizer._parse_number("# 07"), 7)
+        self.assertIsNone(JerseyNumberRecognizer._parse_number("abc"))
+        self.assertIsNone(JerseyNumberRecognizer._parse_number("123"))
+
+    def test_pitch_schema_requires_exact_checkpoint_landmark_count(self):
+        with tempfile.TemporaryDirectory() as directory:
+            schema = Path(directory) / "pitch.json"
+            schema.write_text(
+                json.dumps(
+                    {
+                        "landmarks": [
+                            {"index": index, "name": str(index), "pitch_xy": [index, 0]}
+                            for index in range(4)
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "97 points"):
+                load_pitch_landmarks(str(schema), expected_count=97)
+            self.assertEqual(len(load_pitch_landmarks(str(schema), expected_count=4)), 4)
+
+    def test_pitch_homography_accepts_consistent_semantic_points(self):
+        calibrator = NativePitchCalibrator(expected_landmarks=4)
+        calibrator.landmarks = [
+            PitchLandmark(0, "top-left", 0, 0),
+            PitchLandmark(1, "top-right", 105, 0),
+            PitchLandmark(2, "bottom-right", 105, 68),
+            PitchLandmark(3, "bottom-left", 0, 68),
+        ]
+        observations = [
+            (0, 0, 0, 0.99),
+            (1, 1920, 0, 0.99),
+            (2, 1920, 1080, 0.99),
+            (3, 0, 1080, 0.99),
+        ]
+
+        result = calibrator._fit(observations, 1920, 1080)
+
+        self.assertIsNotNone(result)
+        self.assertEqual(result.inliers, 4)
+        calibrator.homography = result.homography
+        center = calibrator.project(960, 540)
+        self.assertAlmostEqual(center[0], 52.5, places=1)
+        self.assertAlmostEqual(center[1], 34.0, places=1)
+        self.assertEqual(calibrator.outside_distance(*center), 0.0)
+        self.assertAlmostEqual(calibrator.outside_distance(-3, 72), 5.0)
+
+    def test_roster_identity_consolidates_non_simultaneous_fragments(self):
+        def summary(start, player_id):
+            return {
+                "start_ms": start,
+                "end_ms": start + 1_000,
+                "confidence_sum": 5.0,
+                "identity_confidence_sum": 4.0,
+                "samples": 5,
+                "team_votes": Counter({"home": 4.0}),
+                "shirt_votes": Counter({10: 3.0}),
+                "role_votes": Counter({"player": 4.0}),
+                "roster_player_votes": Counter({player_id: 3.0}),
+                "points": [{"t": start, "x": 1, "y": 2, "space": "pitch_meters"}],
+                "identity_evidence": {},
+            }
+
+        summaries = {
+            "native-1": summary(1_000, 7),
+            "native-9": summary(20_000, 7),
+        }
+
+        aliases = MatchAnalysisRunner._consolidate_roster_tracks(summaries)
+
+        self.assertEqual(aliases, {"native-9": "native-1"})
+        self.assertEqual(set(summaries), {"native-1"})
+        self.assertEqual(summaries["native-1"]["samples"], 10)
+
+    def test_roster_identity_never_merges_simultaneous_players(self):
+        shared = {
+            "start_ms": 1_000,
+            "end_ms": 2_000,
+            "confidence_sum": 2.0,
+            "identity_confidence_sum": 2.0,
+            "samples": 2,
+            "team_votes": Counter({"home": 2.0}),
+            "shirt_votes": Counter({10: 2.0}),
+            "role_votes": Counter({"player": 2.0}),
+            "roster_player_votes": Counter({7: 2.0}),
+            "identity_evidence": {},
+        }
+        summaries = {
+            "native-1": {**shared, "points": [{"t": 1_000}]},
+            "native-2": {**shared, "points": [{"t": 1_080}]},
+        }
+
+        aliases = MatchAnalysisRunner._consolidate_roster_tracks(summaries)
+
+        self.assertEqual(aliases, {})
+        self.assertEqual(len(summaries), 2)
+
+    def test_tracking_evaluation_measures_detection_identity_team_and_pitch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            truth_path = Path(directory) / "truth.csv"
+            truth_path.write_text(
+                "timestamp_ms,object_id,role,x1,y1,x2,y2,team,shirt_number,pitch_x,pitch_y\n"
+                "1000,p10,player,10,10,30,70,home,10,20,30\n"
+                "1100,p10,player,12,10,32,70,home,10,21,30\n",
+                encoding="utf-8",
+            )
+            tracking_path = Path(directory) / "tracking.ndjson"
+            rows = []
+            for timestamp, bbox, pitch_x in (
+                (1_000, [10, 10, 30, 70], 20),
+                (1_100, [12, 10, 32, 70], 21),
+            ):
+                rows.append(
+                    json.dumps(
+                        {
+                            "frame": {
+                                "timestamp_ms": timestamp,
+                                "objects": [
+                                    {
+                                        "track_id": "native-1",
+                                        "role": "player",
+                                        "bbox_xyxy": bbox,
+                                        "team_key": "home",
+                                        "shirt_number": 10,
+                                        "pitch_x": pitch_x,
+                                        "pitch_y": 30,
+                                    }
+                                ],
+                            }
+                        }
+                    )
+                )
+            tracking_path.write_text("\n".join(rows), encoding="utf-8")
+
+            metadata = validate_ground_truth(truth_path)
+            result = evaluate_tracking(tracking_path, truth_path)
+
+        self.assertEqual(metadata["frames"], 2)
+        self.assertEqual(result["precision_pct"], 100.0)
+        self.assertEqual(result["recall_pct"], 100.0)
+        self.assertEqual(result["identity_consistency_pct"], 100.0)
+        self.assertEqual(result["idf1_pct"], 100.0)
+        self.assertEqual(result["hota_50_pct"], 100.0)
+        self.assertEqual(result["team_accuracy_pct"], 100.0)
+        self.assertEqual(result["jersey_accuracy_pct"], 100.0)
+        self.assertEqual(result["mean_pitch_error_m"], 0.0)
+
+    def test_unreviewed_prediction_draft_is_not_accepted_as_truth(self):
+        with tempfile.TemporaryDirectory() as directory:
+            truth_path = Path(directory) / "truth.csv"
+            truth_path.write_text(
+                "timestamp_ms,object_id,role,x1,y1,x2,y2,reviewed\n"
+                "1000,p10,player,10,10,30,70,NO\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "reviewed=YES"):
+                validate_ground_truth(truth_path)
 
 
 class BallInPlayTests(unittest.TestCase):

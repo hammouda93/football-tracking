@@ -13,6 +13,7 @@ from .models import (
     Team,
     TeamMatchStat,
     Track,
+    TrackingGroundTruth,
 )
 
 
@@ -44,3 +45,4 @@ admin.site.register(PossessionSegment)
 admin.site.register(Event)
 admin.site.register(TeamMatchStat)
 admin.site.register(PlayerMatchStat)
+admin.site.register(TrackingGroundTruth)

@@ -21,6 +21,10 @@ def artifact_upload_to(instance: "AnalysisArtifact", filename: str) -> str:
     return f"matches/{instance.analysis_run.match_id}/artifacts/{filename}"
 
 
+def ground_truth_upload_to(instance: "TrackingGroundTruth", filename: str) -> str:
+    return f"matches/{instance.match_id}/ground-truth/{uuid4().hex}.csv"
+
+
 class Team(models.Model):
     name = models.CharField(max_length=160)
     short_name = models.CharField(max_length=12, blank=True)
@@ -137,6 +141,25 @@ class MatchVideo(models.Model):
 
     def __str__(self) -> str:
         return self.original_name
+
+
+class TrackingGroundTruth(models.Model):
+    """User-reviewed tracking labels used to score the 2-minute gate."""
+
+    match = models.OneToOneField(
+        Match,
+        on_delete=models.CASCADE,
+        related_name="tracking_ground_truth",
+    )
+    file = models.FileField(upload_to=ground_truth_upload_to)
+    original_name = models.CharField(max_length=255)
+    row_count = models.PositiveIntegerField(default=0)
+    frame_count = models.PositiveIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self) -> str:
+        return f"Vérité terrain — {self.match}"
 
 
 class MatchPeriod(models.Model):

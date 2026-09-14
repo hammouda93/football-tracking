@@ -17,6 +17,16 @@ urlpatterns = [
     ),
     path("matches/<uuid:pk>/players/add/", views.add_player, name="match-add-player"),
     path("matches/<uuid:pk>/roster/import/", views.import_roster, name="match-import-roster"),
+    path(
+        "matches/<uuid:pk>/ground-truth/import/",
+        views.import_tracking_ground_truth,
+        name="match-import-ground-truth",
+    ),
+    path(
+        "matches/<uuid:pk>/ground-truth/draft.csv",
+        views.export_tracking_ground_truth_draft,
+        name="match-export-ground-truth-draft",
+    ),
     path("matches/<uuid:pk>/export/events.csv", views.export_events_csv, name="match-export-events"),
     path("matches/<uuid:pk>/export/report.json", views.export_report_json, name="match-export-report"),
     path("analysis/<uuid:pk>/status/", views.analysis_status, name="analysis-status"),

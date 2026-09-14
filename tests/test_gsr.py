@@ -257,8 +257,8 @@ class GSRRunnerIntegrationTests(TestCase):
         self.assertEqual(result["athlete_engine"], "tracklab")
         self.assertEqual(result["gsr"]["engine_revision"], "abc123")
         summary = next(iter(result["tracks"].values()))
-        self.assertEqual(summary["shirt_votes"][10], 1)
-        self.assertEqual(summary["team_votes"]["home"], 1)
+        self.assertAlmostEqual(summary["shirt_votes"][10], 0.91)
+        self.assertAlmostEqual(summary["team_votes"]["home"], 0.91)
 
 
 if __name__ == "__main__":

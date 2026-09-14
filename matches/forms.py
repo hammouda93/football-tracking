@@ -60,6 +60,25 @@ class RosterUploadForm(forms.Form):
     )
 
 
+class TrackingGroundTruthUploadForm(forms.Form):
+    ground_truth = forms.FileField(
+        label="Vérité terrain CSV",
+        help_text=(
+            "timestamp_ms, object_id, role, x1, y1, x2, y2, "
+            "team, shirt_number, pitch_x, pitch_y, reviewed"
+        ),
+        widget=forms.ClearableFileInput(attrs={"accept": ".csv,text/csv"}),
+    )
+
+    def clean_ground_truth(self):
+        uploaded = self.cleaned_data["ground_truth"]
+        if Path(uploaded.name).suffix.lower() != ".csv":
+            raise forms.ValidationError("La vérité terrain doit être un CSV.")
+        if uploaded.size > 20 * 1024 * 1024:
+            raise forms.ValidationError("Le CSV dépasse 20 Mo.")
+        return uploaded
+
+
 class EventReviewForm(forms.ModelForm):
     class Meta:
         model = Event

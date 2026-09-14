@@ -28,12 +28,14 @@ from matches.models import (
     PossessionSegment,
     TeamMatchStat,
     Track,
+    TrackingGroundTruth,
 )
 
 from .ball_in_play import BallInPlayEngine
 from .camera import CameraStabilizer, PitchProjector
 from .clips import ClipPlanner, render_clip
 from .events import EventEngine
+from .evaluation import evaluate_tracking
 from .gsr import ExternalGSRExecutor, GSR_ENGINE_PROFILES
 from .periods import PeriodDetector
 from .providers.base import build_provider
@@ -324,7 +326,7 @@ class MatchAnalysisRunner:
         operation = (
             "Test court"
             if self.analysis_mode == "reference"
-            else ("Test rapide" if self.analysis_mode == "sample" else "Tracking")
+            else ("Validation 2 min" if self.analysis_mode == "sample" else "Tracking")
         )
         progress_backend = backend if athlete_engine == "legacy" else athlete_engine
         self._save_live_progress(
@@ -380,10 +382,17 @@ class MatchAnalysisRunner:
         }
         camera_inliers: list[float] = []
         diagnostic_counts: Counter = Counter()
+        diagnostic_frame_series: defaultdict[str, list[int]] = defaultdict(list)
+        period_diagnostic_counts: defaultdict[int, Counter] = defaultdict(Counter)
+        period_diagnostic_series: defaultdict[
+            int, defaultdict[str, list[int]]
+        ] = defaultdict(lambda: defaultdict(list))
         team_observations: Counter = Counter()
+        period_team_observations: defaultdict[int, Counter] = defaultdict(Counter)
         model_classes: dict[str, str] = {}
         tracker_name = str(self.config.get("yolo_tracker", "bytetrack"))
         preview_artifacts: list[dict] = []
+        ground_truth_evaluation: dict[str, Any] = {"status": "missing"}
         live_preview_path = (
             Path(settings.MEDIA_ROOT)
             / "matches"
@@ -400,6 +409,7 @@ class MatchAnalysisRunner:
         )
         native_live_requested = native_live_enabled
         self._live_track_history: dict[str, list[tuple[int, int]]] = {}
+        self._live_debug_overlay = False
 
         with tempfile.TemporaryDirectory(prefix="football-tracking-") as temp_dir:
             temp_path = Path(temp_dir)
@@ -515,19 +525,157 @@ class MatchAnalysisRunner:
                         diagnostic_counts["duplicate_person_detections"] += int(
                             analysis.diagnostics.get("duplicate_person_detections", 0)
                         )
+                        period_counts = period_diagnostic_counts[period.number]
+                        period_counts["frames"] += 1
+                        period_counts["raw_athlete_detections"] += raw_athletes
+                        period_counts["athlete_observations"] += len(analysis.athletes)
+                        stage_values = {
+                            "detector_candidate_athletes": int(
+                                analysis.diagnostics.get(
+                                    "detector_candidate_athletes", raw_athletes
+                                )
+                            ),
+                            "tracker_input_athletes": int(
+                                analysis.diagnostics.get(
+                                    "tracker_input_athletes", raw_athletes
+                                )
+                            ),
+                            "tracker_output_athletes": int(
+                                analysis.diagnostics.get(
+                                    "tracker_output_athletes", len(analysis.athletes)
+                                )
+                            ),
+                            "detector_rescue_athletes": int(
+                                analysis.diagnostics.get("detector_rescue_athletes", 0)
+                            ),
+                            "native_identity_input_athletes": int(
+                                analysis.diagnostics.get(
+                                    "native_identity_input_athletes",
+                                    analysis.diagnostics.get(
+                                        "tracker_output_athletes",
+                                        len(analysis.athletes),
+                                    ),
+                                )
+                            ),
+                            "yolo_deduplicated_athletes": int(
+                                analysis.diagnostics.get(
+                                    "yolo_deduplicated_athletes", 0
+                                )
+                            ),
+                            "native_duplicates_removed": int(
+                                analysis.diagnostics.get(
+                                    "native_duplicates_removed", 0
+                                )
+                            ),
+                            "native_identity_births": int(
+                                analysis.diagnostics.get(
+                                    "native_identity_births", 0
+                                )
+                            ),
+                            "native_direct_assignments": int(
+                                analysis.diagnostics.get(
+                                    "native_direct_assignments", 0
+                                )
+                            ),
+                            "native_short_stitches": int(
+                                analysis.diagnostics.get(
+                                    "native_short_stitches", 0
+                                )
+                            ),
+                            "native_long_stitches": int(
+                                analysis.diagnostics.get(
+                                    "native_long_stitches", 0
+                                )
+                            ),
+                            "native_direct_rejections": int(
+                                analysis.diagnostics.get(
+                                    "native_direct_rejections", 0
+                                )
+                            ),
+                            "scene_cut_tracker_resets": int(
+                                bool(
+                                    analysis.diagnostics.get(
+                                        "scene_cut_tracker_reset", False
+                                    )
+                                )
+                            ),
+                        }
+                        for key, value in stage_values.items():
+                            diagnostic_counts[key] += value
+                            period_counts[key] += value
+                        frame_values = {
+                            "raw_athlete_detections": raw_athletes,
+                            "detector_candidate_athletes": stage_values[
+                                "detector_candidate_athletes"
+                            ],
+                            "tracker_input_athletes": stage_values[
+                                "tracker_input_athletes"
+                            ],
+                            "tracker_output_athletes": stage_values[
+                                "tracker_output_athletes"
+                            ],
+                            "detector_rescue_athletes": stage_values[
+                                "detector_rescue_athletes"
+                            ],
+                            "native_identity_input_athletes": stage_values[
+                                "native_identity_input_athletes"
+                            ],
+                            "athlete_observations": len(analysis.athletes),
+                        }
+                        for key, value in frame_values.items():
+                            diagnostic_frame_series[key].append(value)
+                            period_diagnostic_series[period.number][key].append(value)
+                        for reason, value in (
+                            analysis.diagnostics.get(
+                                "native_direct_rejection_reasons"
+                            )
+                            or {}
+                        ).items():
+                            reason_key = f"direct_rejection_{reason}"
+                            diagnostic_counts[reason_key] += int(value)
+                            period_counts[reason_key] += int(value)
+                        for confidence_band, value in (
+                            analysis.diagnostics.get("athlete_confidence_bins") or {}
+                        ).items():
+                            band_key = f"athlete_confidence_{confidence_band}"
+                            diagnostic_counts[band_key] += int(value)
+                            period_counts[band_key] += int(value)
+                        ball_reason = str(
+                            analysis.diagnostics.get("ball_selection_reason") or ""
+                        )
+                        if ball_reason:
+                            diagnostic_counts[f"ball_reason_{ball_reason}"] += 1
+                            period_counts[f"ball_reason_{ball_reason}"] += 1
                         model_classes.update(analysis.diagnostics.get("model_classes") or {})
                         tracker_name = str(
                             analysis.diagnostics.get("tracker") or tracker_name
                         )
-                        diagnostic_counts["ball_visible_frames"] += int(analysis.ball is not None)
-                        diagnostic_counts["field_frames"] += int(
+                        ball_visible = int(analysis.ball is not None)
+                        diagnostic_counts["ball_visible_frames"] += ball_visible
+                        period_counts["ball_visible_frames"] += ball_visible
+                        period_counts["raw_ball_detections"] += int(
+                            analysis.diagnostics.get("raw_ball_detections", 0)
+                        )
+                        diagnostic_counts["pitch_metric_frames"] += int(
+                            any(
+                                athlete.pitch_x is not None and athlete.pitch_y is not None
+                                for athlete in analysis.athletes
+                            )
+                        )
+                        field_live = int(
                             analysis.field_score >= 0.14
                             and not analysis.scene_cut
                             and analysis.replay_probability < 0.65
                         )
-                        diagnostic_counts[f"state_{str(sample.state)}"] += 1
+                        diagnostic_counts["field_frames"] += field_live
+                        period_counts["field_frames"] += field_live
+                        state_key = f"state_{str(sample.state)}"
+                        diagnostic_counts[state_key] += 1
+                        period_counts[state_key] += 1
                         for athlete in analysis.athletes:
-                            team_observations[athlete.team_key or "unknown"] += 1
+                            team_key = athlete.team_key or "unknown"
+                            team_observations[team_key] += 1
+                            period_team_observations[period.number][team_key] += 1
                         if (
                             self.analysis_mode in {"reference", "sample"}
                             and not preview_saved
@@ -646,6 +794,48 @@ class MatchAnalysisRunner:
                         candidates = EventEngine().detect(period_samples)
                         all_events.extend((period, candidate) for candidate in candidates)
 
+            identity_aliases = self._consolidate_roster_tracks(track_summaries)
+            if identity_aliases:
+                self._rewrite_tracking_identities(tracking_path, identity_aliases)
+                for _period, sample in all_samples:
+                    sample.player_key = self._identity_alias(
+                        sample.player_key,
+                        identity_aliases,
+                    )
+                for _period, span in all_spans:
+                    span.player_key = self._identity_alias(
+                        span.player_key,
+                        identity_aliases,
+                    )
+                for _period, candidate in all_events:
+                    candidate.player_key = self._identity_alias(
+                        candidate.player_key,
+                        identity_aliases,
+                    )
+                    candidate.recipient_key = self._identity_alias(
+                        candidate.recipient_key,
+                        identity_aliases,
+                    )
+
+            if self.analysis_mode == "sample":
+                truth = TrackingGroundTruth.objects.filter(match=self.match).first()
+                if truth is not None and truth.file:
+                    try:
+                        ground_truth_evaluation = evaluate_tracking(
+                            tracking_path,
+                            truth.file.path,
+                            timestamp_tolerance_ms=max(
+                                45,
+                                int(round(600.0 / max(tracking_fps, 1.0))),
+                            ),
+                        )
+                    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+                        ground_truth_evaluation = {
+                            "status": "error",
+                            "verdict": "fail",
+                            "issues": [f"Évaluation vérité terrain impossible: {exc}"],
+                        }
+
             _save_local_artifact(
                 self.run,
                 AnalysisArtifact.Kind.TRACKING,
@@ -702,6 +892,13 @@ class MatchAnalysisRunner:
                 if hasattr(provider, "team_calibration_diagnostics")
                 else {}
             ),
+            strict_validation=bool(
+                self.config.get("native_gsr_strict_validation", False)
+            ),
+            frame_series=diagnostic_frame_series,
+            period_counts=period_diagnostic_counts,
+            period_frame_series=period_diagnostic_series,
+            period_team_observations=period_team_observations,
         )
         diagnostics["athlete_engine"] = athlete_engine
         diagnostics["gsr"] = {
@@ -712,6 +909,25 @@ class MatchAnalysisRunner:
         diagnostics["gsr_missing_frames"] = int(
             diagnostic_counts["gsr_missing_frames"]
         )
+        diagnostics["ground_truth"] = ground_truth_evaluation
+        if ground_truth_evaluation.get("verdict") == "fail":
+            diagnostics["issues"] = [
+                *ground_truth_evaluation.get("issues", []),
+                *diagnostics["issues"],
+            ]
+            diagnostics["verdict"] = "fail"
+            diagnostics.setdefault("hard_blockers", []).append(
+                "Le test annoté de 2 minutes n’atteint pas les seuils de qualité."
+            )
+        elif (
+            self.analysis_mode == "sample"
+            and bool(self.config.get("native_gsr_require_ground_truth", False))
+            and ground_truth_evaluation.get("status") != "evaluated"
+        ):
+            issue = "Une vérité terrain CSV est requise pour valider ce profil."
+            diagnostics["issues"].insert(0, issue)
+            diagnostics.setdefault("hard_blockers", []).append(issue)
+            diagnostics["verdict"] = "fail"
         if athlete_engine != "legacy":
             missing_ratio = diagnostic_counts["gsr_missing_frames"] / max(
                 diagnostic_counts["frames"], 1
@@ -748,13 +964,31 @@ class MatchAnalysisRunner:
         ball_only: bool = False,
     ):
         ball_class_ids = self.config.get("yolo_ball_class_ids", [])
+        profile = str(self.config.get("yolo_profile", "main_py"))
+        provider_name = (
+            "native_gsr"
+            if backend == "yolo" and profile == "native_gsr" and not ball_only
+            else backend
+        )
         return build_provider(
-            backend,
+            provider_name,
             model_path=self.config.get("yolo_model_path", ""),
             device=device,
-            profile=str(self.config.get("yolo_profile", "main_py")),
+            profile=profile,
             confidence=float(self.config.get("yolo_confidence", 0.30)),
             ball_confidence=float(self.config.get("yolo_ball_confidence", 0.12)),
+            ball_tiled_recovery=bool(
+                self.config.get("yolo_ball_tiled_recovery", False)
+            ),
+            ball_recovery_interval_frames=int(
+                self.config.get("yolo_ball_recovery_interval_frames", 12)
+            ),
+            ball_recovery_image_size=int(
+                self.config.get("yolo_ball_recovery_image_size", 960)
+            ),
+            ball_recovery_overlap=float(
+                self.config.get("yolo_ball_recovery_overlap", 0.15)
+            ),
             image_size=int(self.config.get("yolo_image_size", 1280)),
             tracking_fps=tracking_fps,
             tracker_name=str(self.config.get("yolo_tracker", "bytetrack")),
@@ -782,6 +1016,58 @@ class MatchAnalysisRunner:
             ball_class_ids=ball_class_ids,
             inference_class_ids=ball_class_ids if ball_only and backend == "yolo" else None,
             home_team_cluster=str(self.config.get("home_team_cluster", "B")),
+            native_gsr_reid_model_path=str(
+                self.config.get("native_gsr_reid_model_path", "")
+            ),
+            native_gsr_max_gap_seconds=float(
+                self.config.get("native_gsr_max_gap_seconds", 3.0)
+            ),
+            native_gsr_global_max_gap_seconds=float(
+                self.config.get("native_gsr_global_max_gap_seconds", 7_200.0)
+            ),
+            native_gsr_reid_backend=str(
+                self.config.get("native_gsr_reid_backend", "auto")
+            ),
+            native_gsr_reid_model_name=str(
+                self.config.get("native_gsr_reid_model_name", "osnet_x0_25")
+            ),
+            native_gsr_jersey_engine=str(
+                self.config.get("native_gsr_jersey_engine", "auto")
+            ),
+            native_gsr_jersey_model_path=str(
+                self.config.get("native_gsr_jersey_model_path", "")
+            ),
+            native_gsr_jersey_device=str(
+                self.config.get("native_gsr_jersey_device", "cpu")
+            ),
+            native_gsr_jersey_interval_frames=int(
+                self.config.get("native_gsr_jersey_interval_frames", 12)
+            ),
+            native_gsr_jersey_minimum_box_height=int(
+                self.config.get("native_gsr_jersey_minimum_box_height", 72)
+            ),
+            native_gsr_jersey_max_crops_per_frame=int(
+                self.config.get("native_gsr_jersey_max_crops_per_frame", 4)
+            ),
+            native_gsr_pitch_model_path=str(
+                self.config.get("native_gsr_pitch_model_path", "")
+            ),
+            native_gsr_pitch_schema_path=str(
+                self.config.get("native_gsr_pitch_schema_path", "")
+            ),
+            native_gsr_pitch_confidence=float(
+                self.config.get("native_gsr_pitch_confidence", 0.20)
+            ),
+            native_gsr_pitch_interval_frames=int(
+                self.config.get("native_gsr_pitch_interval_frames", 10)
+            ),
+            native_gsr_pitch_hold_frames=int(
+                self.config.get("native_gsr_pitch_hold_frames", 20)
+            ),
+            native_gsr_pitch_expected_landmarks=int(
+                self.config.get("native_gsr_pitch_expected_landmarks", 97)
+            ),
+            native_gsr_roster=list(self.config.get("native_gsr_roster") or []),
         )
 
     def _build_external_gsr_provider(
@@ -924,26 +1210,28 @@ class MatchAnalysisRunner:
 
         preview = frame.copy()
         _frame_height, frame_width = preview.shape[:2]
-        raw_colors = {
-            "player": (255, 0, 255),
-            "goalkeeper": (255, 120, 0),
-            "referee": (255, 255, 0),
-            "ball": (0, 255, 255),
-        }
-        for detection in analysis.diagnostics.get("raw_detections", []):
-            box = detection.get("bbox") or []
-            if len(box) < 4:
-                continue
-            role = str(detection.get("role", "player"))
-            x1, y1, x2, y2 = (int(value) for value in box[:4])
-            color = raw_colors.get(role, (255, 0, 255))
-            cv2.rectangle(
-                preview,
-                (x1, y1),
-                (x2, y2),
-                color,
-                2 if role == "ball" else 1,
-            )
+        debug_overlay = bool(getattr(self, "_live_debug_overlay", False))
+        if debug_overlay:
+            raw_colors = {
+                "player": (255, 0, 255),
+                "goalkeeper": (255, 120, 0),
+                "referee": (255, 255, 0),
+                "ball": (0, 255, 255),
+            }
+            for detection in analysis.diagnostics.get("raw_detections", []):
+                box = detection.get("bbox") or []
+                if len(box) < 4:
+                    continue
+                role = str(detection.get("role", "player"))
+                x1, y1, x2, y2 = (int(value) for value in box[:4])
+                color = raw_colors.get(role, (255, 0, 255))
+                cv2.rectangle(
+                    preview,
+                    (x1, y1),
+                    (x2, y2),
+                    color,
+                    2 if role == "ball" else 1,
+                )
 
         final_colors = {
             "home": (70, 220, 120),
@@ -962,6 +1250,9 @@ class MatchAnalysisRunner:
                 if obj.shirt_number is not None
                 else f"ID {track_number}"
             )
+            roster_name = str(obj.metadata.get("roster_player_name") or "").strip()
+            if roster_name:
+                identity = f"{identity} {roster_name}"
             if obj.role == ObjectRole.BALL:
                 color = final_colors["ball"]
                 label = "BALLON"
@@ -1035,7 +1326,31 @@ class MatchAnalysisRunner:
         raw_players = int(analysis.diagnostics.get("raw_athlete_detections", 0))
         tracked_players = len(analysis.athletes)
         raw_balls = int(analysis.diagnostics.get("raw_ball_detections", 0))
-        calibration = analysis.diagnostics.get("team_calibration") or {}
+        identity_diagnostics = (
+            analysis.diagnostics.get("native_identity")
+            or analysis.diagnostics.get("team_calibration")
+            or {}
+        )
+        team_status = str(
+            identity_diagnostics.get("status", "collecting")
+        ).upper()
+        reid_backend = str(
+            identity_diagnostics.get("appearance_backend", "none")
+        ).upper()
+        reid_status = (
+            "ACTIF" if identity_diagnostics.get("deep_reid_ready") else "FALLBACK"
+        )
+        jersey_tracklets = int(identity_diagnostics.get("jersey_tracklets", 0))
+        canonical_tracks = int(identity_diagnostics.get("canonical_tracks", 0))
+        stitched = int(identity_diagnostics.get("fragments_stitched", 0))
+        duplicates = int(identity_diagnostics.get("duplicates_removed", 0))
+        ball_source = (
+            str(analysis.ball.metadata.get("ball_engine", "inconnue"))
+            .replace("yolo_", "")
+            .upper()
+            if analysis.ball
+            else "-"
+        )
         operation = "REFERENCE 40 S" if self.analysis_mode == "reference" else "TEST 2 MIN"
         header_1 = (
             f"{operation} {elapsed_s:05.1f}/{total_s:.0f}s"
@@ -1043,19 +1358,25 @@ class MatchAnalysisRunner:
             f" | VIDEO={self._duration_label(analysis.timestamp_ms / 1000)}"
         )
         header_2 = (
-            f"RAW JOUEURS={raw_players} | TRACKES={tracked_players}"
-            f" | PERDUS={max(0, raw_players - tracked_players)}"
+            f"MODE={'BRUT+FINAL' if debug_overlay else 'FINAL'}"
+            f" | RAW JOUEURS={raw_players} | FINAUX={tracked_players}"
+            f" | ECART={max(0, raw_players - tracked_players)}"
         )
         header_3 = (
-            f"RAW BALL={raw_balls} | BALL={'OUI' if analysis.ball else 'NON'}"
-            f" | MAILLOTS={str(calibration.get('status', 'collecting')).upper()}"
-            f" ({int(calibration.get('samples', 0))}) | ESC=ARRETER"
+            f"RE-ID={reid_backend} {reid_status} | EQUIPES={team_status}"
+            f" | OCR NUMEROS={jersey_tracklets}/{canonical_tracks}"
         )
-        cv2.rectangle(preview, (0, 0), (frame_width, 92), (15, 15, 15), -1)
+        header_4 = (
+            f"BALL RAW={raw_balls} FINAL={'OUI' if analysis.ball else 'NON'}"
+            f" SOURCE={ball_source} | FUSIONS={stitched} | DOUBLONS={duplicates}"
+            " | D=BRUT | ESC=ARRETER"
+        )
+        cv2.rectangle(preview, (0, 0), (frame_width, 120), (15, 15, 15), -1)
         for line, y, size in (
-            (header_1, 25, 0.58),
-            (header_2, 53, 0.56),
-            (header_3, 80, 0.53),
+            (header_1, 25, 0.56),
+            (header_2, 53, 0.52),
+            (header_3, 80, 0.49),
+            (header_4, 107, 0.46),
         ):
             cv2.putText(
                 preview,
@@ -1081,6 +1402,8 @@ class MatchAnalysisRunner:
                 exc,
             )
             return False
+        if key in {ord("d"), ord("D")}:
+            self._live_debug_overlay = not debug_overlay
         if key == 27:
             cv2.destroyAllWindows()
             raise AnalysisCancelled()
@@ -1152,6 +1475,9 @@ class MatchAnalysisRunner:
                 if obj.shirt_number is not None
                 else f"ID {track_number}"
             )
+            roster_name = str(obj.metadata.get("roster_player_name") or "").strip()
+            if roster_name:
+                identity = f"{identity} {roster_name}"
             if is_ball:
                 label = "BALLON"
             elif obj.role == ObjectRole.GOALKEEPER:
@@ -1256,6 +1582,9 @@ class MatchAnalysisRunner:
                 if obj.shirt_number is not None
                 else f"ID {track_number}"
             )
+            roster_name = str(obj.metadata.get("roster_player_name") or "").strip()
+            if roster_name:
+                identity = f"{identity} {roster_name}"
             if obj.role == ObjectRole.BALL:
                 color = colors["ball"]
                 label = "BALLON"
@@ -1286,13 +1615,42 @@ class MatchAnalysisRunner:
                 1,
                 cv2.LINE_AA,
             )
-        cv2.rectangle(preview, (8, 8), (850, 38), (20, 20, 20), -1)
+        identity_diagnostics = (
+            analysis.diagnostics.get("native_identity")
+            or analysis.diagnostics.get("team_calibration")
+            or {}
+        )
+        reid_backend = str(
+            identity_diagnostics.get("appearance_backend", "none")
+        ).upper()
+        team_status = str(
+            identity_diagnostics.get("status", "collecting")
+        ).upper()
+        jersey_tracklets = int(identity_diagnostics.get("jersey_tracklets", 0))
+        ball_source = (
+            str(analysis.ball.metadata.get("ball_engine", "inconnue"))
+            .replace("yolo_", "")
+            .upper()
+            if analysis.ball
+            else "-"
+        )
+        cv2.rectangle(preview, (8, 8), (1120, 66), (20, 20, 20), -1)
         cv2.putText(
             preview,
-            f"TRACKING LIVE - VIDEO {MatchAnalysisRunner._duration_label(analysis.timestamp_ms / 1000)}",
-            (18, 28),
+            f"TRACKING FINAL - VIDEO {MatchAnalysisRunner._duration_label(analysis.timestamp_ms / 1000)}",
+            (18, 29),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.50,
+            (245, 245, 245),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            preview,
+            f"RE-ID={reid_backend} | EQUIPES={team_status} | OCR={jersey_tracklets} | BALL={ball_source}",
+            (18, 54),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.44,
             (245, 245, 245),
             1,
             cv2.LINE_AA,
@@ -1406,6 +1764,11 @@ class MatchAnalysisRunner:
         ball_confidence: float = 0.0,
         tracker_frame_rate: int = 0,
         team_calibration: dict | None = None,
+        strict_validation: bool = False,
+        frame_series: dict[str, list[int]] | None = None,
+        period_counts: dict[int, Counter] | None = None,
+        period_frame_series: dict[int, dict[str, list[int]]] | None = None,
+        period_team_observations: dict[int, Counter] | None = None,
     ) -> dict:
         frames = max(int(counts["frames"]), 0)
         raw_athlete_observations = int(
@@ -1429,6 +1792,104 @@ class MatchAnalysisRunner:
             int(counts[f"state_{state}"])
             for state in ("controlled", "contested", "loose")
         )
+        frame_series = frame_series or {}
+        period_counts = period_counts or {}
+        period_frame_series = period_frame_series or {}
+        period_team_observations = period_team_observations or {}
+
+        def value(scope: Counter, key: str, fallback: int = 0) -> int:
+            return int(scope[key]) if key in scope else int(fallback)
+
+        def distribution(values: list[int]) -> dict[str, int]:
+            ordered = sorted(int(item) for item in values)
+            if not ordered:
+                return {"p10": 0, "median": 0, "p90": 0, "minimum": 0, "maximum": 0}
+
+            def percentile(ratio: float) -> int:
+                return ordered[int(round((len(ordered) - 1) * ratio))]
+
+            return {
+                "p10": percentile(0.10),
+                "median": percentile(0.50),
+                "p90": percentile(0.90),
+                "minimum": ordered[0],
+                "maximum": ordered[-1],
+            }
+
+        def stage_summary(
+            label: str,
+            scope: Counter,
+            series: dict[str, list[int]],
+            teams: Counter,
+        ) -> dict:
+            scope_frames = max(value(scope, "frames"), 1)
+            raw = value(scope, "raw_athlete_detections")
+            candidates = value(scope, "detector_candidate_athletes", raw)
+            tracker_input = value(scope, "tracker_input_athletes", raw)
+            tracker_output = value(
+                scope,
+                "tracker_output_athletes",
+                value(scope, "athlete_observations"),
+            )
+            rescued = value(scope, "detector_rescue_athletes")
+            identity_input = value(
+                scope,
+                "native_identity_input_athletes",
+                tracker_output + rescued,
+            )
+            final = value(scope, "athlete_observations")
+            known_teams = value(teams, "home") + value(teams, "away")
+            final_distribution = distribution(
+                list(series.get("athlete_observations") or [])
+            )
+            return {
+                "label": label,
+                "frames": value(scope, "frames"),
+                "raw_per_frame": round(raw / scope_frames, 2),
+                "candidates_per_frame": round(candidates / scope_frames, 2),
+                "tracker_input_per_frame": round(tracker_input / scope_frames, 2),
+                "tracker_output_per_frame": round(tracker_output / scope_frames, 2),
+                "rescued_per_frame": round(rescued / scope_frames, 2),
+                "identity_input_per_frame": round(identity_input / scope_frames, 2),
+                "final_per_frame": round(final / scope_frames, 2),
+                "dedup_keep_pct": round(100.0 * tracker_input / max(candidates, 1), 2),
+                "tracker_confirmation_pct": round(
+                    100.0 * tracker_output / max(tracker_input, 1), 2
+                ),
+                "identity_keep_pct": round(
+                    100.0 * final / max(identity_input, 1), 2
+                ),
+                "end_to_end_pct": round(100.0 * final / max(raw, 1), 2),
+                "empty_final_pct": round(
+                    100.0
+                    * sum(
+                        int(item == 0)
+                        for item in series.get("athlete_observations") or []
+                    )
+                    / scope_frames,
+                    2,
+                ),
+                "final_distribution": final_distribution,
+                "ball_visibility_pct": round(
+                    100.0 * value(scope, "ball_visible_frames") / scope_frames,
+                    2,
+                ),
+                "scene_cut_resets": value(scope, "scene_cut_tracker_resets"),
+                "identity_births": value(scope, "native_identity_births"),
+                "direct_rejections": value(scope, "native_direct_rejections"),
+                "short_stitches": value(scope, "native_short_stitches"),
+                "long_stitches": value(scope, "native_long_stitches"),
+                "known_team_pct": round(
+                    100.0 * known_teams / max(final, 1), 2
+                ),
+                "home_share_pct": round(
+                    100.0 * value(teams, "home") / max(known_teams, 1), 2
+                ),
+                "away_share_pct": round(
+                    100.0 * value(teams, "away") / max(known_teams, 1), 2
+                ),
+            }
+
         diagnostics = {
             "frames_analyzed": frames,
             "duration_seconds": round(tracking_duration_ms / 1_000, 1),
@@ -1450,6 +1911,9 @@ class MatchAnalysisRunner:
             "tracker_dropped_athletes": int(counts["tracker_dropped_athletes"]),
             "ball_visibility_pct": round(
                 100.0 * counts["ball_visible_frames"] / max(frames, 1), 2
+            ),
+            "pitch_metric_coverage_pct": round(
+                100.0 * counts["pitch_metric_frames"] / max(frames, 1), 2
             ),
             "field_live_pct": round(100.0 * counts["field_frames"] / max(frames, 1), 2),
             "playable_candidate_pct": round(100.0 * playable_frames / max(frames, 1), 2),
@@ -1475,6 +1939,59 @@ class MatchAnalysisRunner:
             "team_calibration": team_calibration or {},
             "issues": [],
         }
+        total_stage = stage_summary(
+            "Total", counts, frame_series, team_observations
+        )
+        stage_breakdown = [total_stage]
+        for period_number in sorted(period_counts):
+            stage_breakdown.append(
+                stage_summary(
+                    f"MT{period_number}",
+                    period_counts[period_number],
+                    period_frame_series.get(period_number, {}),
+                    period_team_observations.get(period_number, Counter()),
+                )
+            )
+        diagnostics["stage_breakdown"] = stage_breakdown
+        diagnostics["tracker_input_per_frame"] = total_stage[
+            "tracker_input_per_frame"
+        ]
+        diagnostics["tracker_output_per_frame"] = total_stage[
+            "tracker_output_per_frame"
+        ]
+        diagnostics["detector_rescue_per_frame"] = total_stage[
+            "rescued_per_frame"
+        ]
+        diagnostics["native_identity_input_per_frame"] = total_stage[
+            "identity_input_per_frame"
+        ]
+        diagnostics["tracker_confirmation_pct"] = total_stage[
+            "tracker_confirmation_pct"
+        ]
+        diagnostics["native_identity_keep_pct"] = total_stage[
+            "identity_keep_pct"
+        ]
+        diagnostics["empty_final_frames_pct"] = total_stage[
+            "empty_final_pct"
+        ]
+        diagnostics["final_player_distribution"] = total_stage[
+            "final_distribution"
+        ]
+        diagnostics["athlete_confidence_bins"] = {
+            "below_activation": value(
+                counts, "athlete_confidence_below_activation"
+            ),
+            "activation_to_strong": value(
+                counts, "athlete_confidence_activation_to_strong"
+            ),
+            "strong": value(counts, "athlete_confidence_strong"),
+        }
+        diagnostics["ball_selection_reasons"] = {
+            key.removeprefix("ball_reason_"): int(count)
+            for key, count in counts.items()
+            if key.startswith("ball_reason_")
+        }
+
         failures: list[str] = []
         warnings: list[str] = []
         if frames < 50:
@@ -1497,6 +2014,78 @@ class MatchAnalysisRunner:
             failures.append("Les identités de piste se fragmentent beaucoup trop vite.")
         elif diagnostics["tracks_per_minute"] > 50:
             warnings.append("La continuité des pistes est encore fragile.")
+        calibration = diagnostics["team_calibration"]
+        if profile_name == "native_gsr":
+            hard_blockers: list[str] = []
+            if calibration.get("status") != "ready":
+                warnings.append(
+                    "Native GSR n’a pas encore assez de tracklets pour stabiliser les deux équipes."
+                )
+            if calibration.get("appearance_backend") == "histogram":
+                target = hard_blockers if strict_validation else warnings
+                target.append(
+                    "Le Re-ID profond est absent : les liaisons longues utilisent seulement couleur et texture."
+                )
+            if calibration.get("appearance_error"):
+                warnings.append(str(calibration["appearance_error"]))
+            jersey = calibration.get("jersey") or {}
+            if not jersey.get("ready"):
+                target = hard_blockers if strict_validation else warnings
+                target.append(
+                    "L’OCR des numéros de maillot n’est pas prêt : aucun checkpoint/ moteur OCR valide."
+                )
+            elif int(jersey.get("eligible_crops", 0)) >= 20 and int(
+                calibration.get("jersey_tracklets", 0)
+            ) == 0:
+                warnings.append(
+                    "L’OCR a vu assez de maillots mais n’a stabilisé aucun numéro."
+                )
+            if int(calibration.get("roster_entries", 0)) == 0:
+                target = hard_blockers if strict_validation else warnings
+                target.append(
+                    "Les effectifs numérotés sont absents : l’identité roster ne peut pas être résolue."
+                )
+            pitch = calibration.get("pitch") or {}
+            if not pitch.get("ready"):
+                target = hard_blockers if strict_validation else warnings
+                target.append(
+                    "Le modèle de points terrain et son schéma 97 points ne sont pas prêts."
+                )
+            elif int(pitch.get("successful_calibrations", 0)) == 0:
+                hard_blockers.append(
+                    "Le modèle terrain a tourné mais aucune homographie fiable n’a été validée."
+                )
+            diagnostics["hard_blockers"] = hard_blockers
+            failures.extend(hard_blockers)
+            diagnostics["identity_flow"] = {
+                "raw_scoped_ids": int(calibration.get("raw_tracks", 0)),
+                "raw_track_segments": int(
+                    calibration.get("raw_track_segments", 0)
+                ),
+                "canonical_births": int(
+                    calibration.get(
+                        "new_identity_observations",
+                        calibration.get("canonical_tracks", 0),
+                    )
+                ),
+                "direct_assignments": int(
+                    calibration.get("direct_assignments", 0)
+                ),
+                "short_stitches": int(calibration.get("short_stitches", 0)),
+                "long_stitches": int(calibration.get("long_stitches", 0)),
+                "direct_rejections": int(
+                    calibration.get("direct_track_rejections", 0)
+                ),
+                "direct_rejection_reasons": dict(
+                    calibration.get("direct_rejection_reasons") or {}
+                ),
+                "scene_cut_resets": int(
+                    calibration.get("scene_cut_tracker_resets", 0)
+                ),
+                "duplicates_removed": int(
+                    calibration.get("duplicates_removed", 0)
+                ),
+            }
         diagnostics["issues"] = failures + warnings
         diagnostics["verdict"] = "fail" if failures else ("warning" if warnings else "pass")
         return diagnostics
@@ -1581,7 +2170,12 @@ class MatchAnalysisRunner:
         summaries: dict[str, dict],
     ) -> None:
         for obj in analysis.objects:
-            if obj.track_id != "ball" and not obj.track_id.startswith(period_prefix):
+            global_identity = obj.metadata.get("identity_scope") == "match"
+            if (
+                obj.track_id != "ball"
+                and not global_identity
+                and not obj.track_id.startswith(period_prefix)
+            ):
                 obj.track_id = period_prefix + obj.track_id
                 if obj.player_key:
                     obj.player_key = obj.track_id
@@ -1593,7 +2187,9 @@ class MatchAnalysisRunner:
             obj.metadata["raw_image_normalized"] = [obj.image_x, obj.image_y]
             obj.image_x = stable_x / max(analysis.width, 1)
             obj.image_y = stable_y / max(analysis.height, 1)
-            if projector is not None:
+            if obj.pitch_x is not None and obj.pitch_y is not None:
+                analysis.coordinate_space = "pitch_meters"
+            elif projector is not None:
                 projected = projector.project(stable_x, stable_y)
                 if projected is not None:
                     obj.pitch_x, obj.pitch_y = projected
@@ -1612,9 +2208,12 @@ class MatchAnalysisRunner:
                     "samples": 0,
                     "team_votes": Counter(),
                     "shirt_votes": Counter(),
+                    "role_votes": Counter(),
+                    "roster_player_votes": Counter(),
                     "points": [],
                     "engine": obj.metadata.get("gsr_engine", "legacy"),
                     "source_track_id": obj.metadata.get("gsr_source_track_id"),
+                    "identity_evidence": {},
                 },
             )
             summary["end_ms"] = analysis.timestamp_ms
@@ -1631,10 +2230,39 @@ class MatchAnalysisRunner:
                     identity_components.append(max(0.0, min(1.0, float(value))))
             summary["identity_confidence_sum"] += min(identity_components)
             summary["samples"] += 1
+            summary["role_votes"][str(obj.role)] += max(0.05, float(obj.confidence))
             if obj.team_key:
-                summary["team_votes"][obj.team_key] += 1
+                team_confidence = obj.metadata.get("team_confidence")
+                summary["team_votes"][obj.team_key] += max(
+                    0.05,
+                    float(obj.confidence if team_confidence is None else team_confidence),
+                )
             if obj.shirt_number is not None:
-                summary["shirt_votes"][obj.shirt_number] += 1
+                jersey_confidence = obj.metadata.get("jersey_confidence")
+                summary["shirt_votes"][obj.shirt_number] += max(
+                    0.05,
+                    float(obj.confidence if jersey_confidence is None else jersey_confidence),
+                )
+            roster_player_id = obj.metadata.get("roster_player_id")
+            if roster_player_id is not None:
+                jersey_confidence = obj.metadata.get("jersey_confidence")
+                summary["roster_player_votes"][int(roster_player_id)] += max(
+                    0.05,
+                    float(obj.confidence if jersey_confidence is None else jersey_confidence),
+                )
+            summary["identity_evidence"].update(
+                {
+                    key: obj.metadata.get(key)
+                    for key in (
+                        "identity_engine",
+                        "reid_backend",
+                        "jersey_backend",
+                        "roster_player_name",
+                        "identity_windows",
+                    )
+                    if obj.metadata.get(key) not in {None, ""}
+                }
+            )
             if len(summary["points"]) < 2_000:
                 summary["points"].append(
                     {
@@ -1644,6 +2272,124 @@ class MatchAnalysisRunner:
                         "space": "pitch_meters" if obj.pitch_x is not None else "image_normalized",
                     }
                 )
+
+    @staticmethod
+    def _identity_alias(value: str | None, aliases: dict[str, str]) -> str | None:
+        if value is None:
+            return None
+        resolved = str(value)
+        visited: set[str] = set()
+        while resolved in aliases and resolved not in visited:
+            visited.add(resolved)
+            resolved = aliases[resolved]
+        return resolved
+
+    @staticmethod
+    def _timestamps_overlap(
+        first: list[int],
+        second: list[int],
+        *,
+        tolerance_ms: int = 120,
+    ) -> bool:
+        first = sorted(first)
+        second = sorted(second)
+        left = right = 0
+        while left < len(first) and right < len(second):
+            difference = first[left] - second[right]
+            if abs(difference) <= tolerance_ms:
+                return True
+            if difference < 0:
+                left += 1
+            else:
+                right += 1
+        return False
+
+    @classmethod
+    def _consolidate_roster_tracks(cls, summaries: dict[str, dict]) -> dict[str, str]:
+        """Merge non-simultaneous fragments with the same proven roster identity."""
+
+        groups: dict[int, list[str]] = defaultdict(list)
+        for uid, summary in summaries.items():
+            roster_votes = summary.get("roster_player_votes") or Counter()
+            if not roster_votes:
+                continue
+            player_id, score = roster_votes.most_common(1)[0]
+            total = float(sum(roster_votes.values()))
+            if float(score) < 0.8 or float(score) / max(total, 1e-9) < 0.72:
+                continue
+            groups[int(player_id)].append(uid)
+
+        aliases: dict[str, str] = {}
+        for uids in groups.values():
+            ordered = sorted(uids, key=lambda uid: summaries[uid]["start_ms"])
+            if len(ordered) < 2:
+                continue
+            target_uid = ordered[0]
+            for source_uid in ordered[1:]:
+                target = summaries[target_uid]
+                source = summaries[source_uid]
+                target_times = [int(point["t"]) for point in target.get("points", [])]
+                source_times = [int(point["t"]) for point in source.get("points", [])]
+                simultaneous = bool(
+                    target_times
+                    and source_times
+                    and cls._timestamps_overlap(target_times, source_times)
+                )
+                if simultaneous:
+                    continue
+                aliases[source_uid] = target_uid
+                target["start_ms"] = min(target["start_ms"], source["start_ms"])
+                target["end_ms"] = max(target["end_ms"], source["end_ms"])
+                target["confidence_sum"] += source["confidence_sum"]
+                target["identity_confidence_sum"] += source.get(
+                    "identity_confidence_sum", source["confidence_sum"]
+                )
+                target["samples"] += source["samples"]
+                for key in (
+                    "team_votes",
+                    "shirt_votes",
+                    "role_votes",
+                    "roster_player_votes",
+                ):
+                    target[key].update(source.get(key) or {})
+                target["identity_evidence"].update(
+                    source.get("identity_evidence") or {}
+                )
+                target["points"] = sorted(
+                    [*target.get("points", []), *source.get("points", [])],
+                    key=lambda point: int(point["t"]),
+                )[:2_000]
+                summaries.pop(source_uid, None)
+        return aliases
+
+    @classmethod
+    def _rewrite_tracking_identities(
+        cls,
+        tracking_path: Path,
+        aliases: dict[str, str],
+    ) -> None:
+        rewritten = tracking_path.with_suffix(".identities.ndjson")
+        with tracking_path.open("r", encoding="utf-8") as source, rewritten.open(
+            "w", encoding="utf-8"
+        ) as target:
+            for line in source:
+                if not line.strip():
+                    continue
+                payload = json.loads(line)
+                frame = payload.get("frame") or {}
+                for obj in frame.get("objects") or []:
+                    obj["track_id"] = cls._identity_alias(
+                        obj.get("track_id"), aliases
+                    )
+                    obj["player_key"] = cls._identity_alias(
+                        obj.get("player_key"), aliases
+                    )
+                possession = payload.get("possession") or {}
+                possession["player_key"] = cls._identity_alias(
+                    possession.get("player_key"), aliases
+                )
+                target.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+        rewritten.replace(tracking_path)
 
     def _projector(self, period: MatchPeriod) -> PitchProjector | None:
         calibration = (self.config.get("pitch_calibration") or {}).get(str(period.number), {})
@@ -1660,17 +2406,43 @@ class MatchAnalysisRunner:
         Track.objects.filter(analysis_run=self.run).delete()
 
         tracks: list[Track] = []
+        roster_players = {
+            player.pk: player
+            for player in self.match.home_team.players.filter(active=True)
+        }
+        roster_players.update(
+            {
+                player.pk: player
+                for player in self.match.away_team.players.filter(active=True)
+            }
+        )
         for uid, summary in result["tracks"].items():
             team_key = self._winner(summary["team_votes"])
             shirt_number = self._winner(summary["shirt_votes"])
+            role = self._winner(summary.get("role_votes", Counter())) or summary["role"]
+            roster_player_id = self._winner(
+                summary.get("roster_player_votes", Counter())
+            )
+            player = roster_players.get(roster_player_id)
+            if player is None and team_key and shirt_number is not None:
+                resolved_team = self.team_by_key.get(team_key)
+                candidates = [
+                    candidate
+                    for candidate in roster_players.values()
+                    if resolved_team is not None
+                    and candidate.team_id == resolved_team.pk
+                    and candidate.shirt_number == shirt_number
+                ]
+                player = candidates[0] if len(candidates) == 1 else None
             samples = max(int(summary["samples"]), 1)
             tracks.append(
                 Track(
                     match=self.match,
                     analysis_run=self.run,
                     track_uid=uid,
-                    role=summary["role"],
+                    role=role if role in Track.Role.values else Track.Role.OTHER,
                     team=self.team_by_key.get(team_key),
+                    player=player,
                     predicted_shirt_number=shirt_number,
                     identity_confidence=round(
                         summary.get("identity_confidence_sum", summary["confidence_sum"])
@@ -1684,6 +2456,8 @@ class MatchAnalysisRunner:
                         "points": summary["points"],
                         "engine": summary.get("engine", "legacy"),
                         "source_track_id": summary.get("source_track_id"),
+                        "identity_evidence": summary.get("identity_evidence", {}),
+                        "identity_auto_resolved": player is not None,
                     },
                 )
             )

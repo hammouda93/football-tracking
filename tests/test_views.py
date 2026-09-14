@@ -7,7 +7,14 @@ from django.test import TestCase
 from django.test.utils import override_settings
 from django.urls import reverse
 
-from matches.models import AnalysisRun, Match, MatchPeriod, MatchVideo, Team
+from matches.models import (
+    AnalysisArtifact,
+    AnalysisRun,
+    Match,
+    MatchPeriod,
+    MatchVideo,
+    Team,
+)
 from pipeline.runner import MatchAnalysisRunner
 from pipeline.types import FrameSignal
 
@@ -55,7 +62,7 @@ class DashboardTests(TestCase):
         self.assertRedirects(response, match.get_absolute_url())
         self.assertFalse(match.analysis_runs.exists())
 
-    def test_sample_run_uses_eight_short_windows_and_no_clips(self):
+    def test_sample_run_uses_one_continuous_minute_per_half_and_no_clips(self):
         home = Team.objects.create(name="Home", short_name="HOM")
         away = Team.objects.create(name="Away", short_name="AWY")
         match = Match.objects.create(home_team=home, away_team=away)
@@ -118,7 +125,7 @@ class DashboardTests(TestCase):
 
         response = self.client.post(
             reverse("match-start-analysis", kwargs={"pk": match.pk}),
-            {"mode": "reference"},
+            {"mode": "sample"},
             follow=True,
         )
 
@@ -126,31 +133,20 @@ class DashboardTests(TestCase):
         self.assertContains(response, "GSR_RUNNER_COMMAND_JSON")
         self.assertFalse(match.analysis_runs.exists())
 
-    def test_reference_run_uses_eight_five_second_windows(self):
+    def test_removed_reference_mode_is_rejected(self):
         home = Team.objects.create(name="Home", short_name="HOM")
         away = Team.objects.create(name="Away", short_name="AWY")
         match = Match.objects.create(home_team=home, away_team=away)
-        for number, start in ((1, 0), (2, 3_300_000)):
-            MatchPeriod.objects.create(
-                match=match,
-                number=number,
-                label=f"MT{number}",
-                video_start_ms=start,
-                video_end_ms=start + 2_700_000,
-                confirmed=True,
-            )
 
         response = self.client.post(
             reverse("match-start-analysis", kwargs={"pk": match.pk}),
             {"mode": "reference"},
+            follow=True,
         )
 
-        self.assertRedirects(response, match.get_absolute_url())
-        run = match.analysis_runs.get()
-        self.assertEqual(run.config["analysis_mode"], "reference")
-        self.assertEqual(run.config["sample_window_seconds"], 5)
-        self.assertEqual(run.config["sample_windows_per_half"], 4)
-        self.assertFalse(run.config["render_clips"])
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Mode d’analyse invalide")
+        self.assertFalse(match.analysis_runs.exists())
 
     def test_team_cluster_mapping_can_be_swapped_without_changing_team_colors(self):
         home = Team.objects.create(
@@ -404,3 +400,47 @@ class DashboardTests(TestCase):
                 self.assertEqual(response["Content-Range"], "bytes 4-7/16")
                 self.assertEqual(response["Content-Length"], "4")
                 self.assertEqual(b"".join(response.streaming_content), b"4567")
+
+    def test_ground_truth_draft_exports_sparse_predictions_for_human_review(self):
+        home = Team.objects.create(name="Home", short_name="HOM")
+        away = Team.objects.create(name="Away", short_name="AWY")
+        match = Match.objects.create(home_team=home, away_team=away)
+        run = AnalysisRun.objects.create(
+            match=match,
+            status=AnalysisRun.Status.COMPLETED,
+            config={"analysis_mode": "sample"},
+        )
+        rows = []
+        for timestamp_ms in (1_000, 1_500, 2_000):
+            rows.append(
+                '{"period":1,"window":1,"frame":{"timestamp_ms":'
+                + str(timestamp_ms)
+                + ',"objects":[{"track_id":"native-1","role":"player",'
+                '"bbox_xyxy":[10,20,30,80],"team_key":"home",'
+                '"shirt_number":10,"pitch_x":20,"pitch_y":30}]}}'
+            )
+
+        with tempfile.TemporaryDirectory() as media_root, override_settings(
+            MEDIA_ROOT=Path(media_root)
+        ):
+            artifact = AnalysisArtifact.objects.create(
+                analysis_run=run,
+                kind=AnalysisArtifact.Kind.TRACKING,
+            )
+            artifact.file.save(
+                "tracking.ndjson",
+                SimpleUploadedFile(
+                    "tracking.ndjson",
+                    "\n".join(rows).encode("utf-8"),
+                ),
+            )
+
+            response = self.client.get(
+                reverse("match-export-ground-truth-draft", kwargs={"pk": match.pk})
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode("utf-8")
+        self.assertIn("reviewed", body)
+        self.assertEqual(body.count("native-1"), 2)
+        self.assertEqual(body.count("NO"), 2)
