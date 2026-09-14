@@ -94,6 +94,11 @@ Torchreid, télécharge OSNet x0.25 MSMT17 et vérifie son SHA-256. Il installe 
 EasyOCR sur CPU afin de conserver les 4 Go de VRAM pour YOLO et OSNet. Le moteur
 n'assimile jamais `football-players.pt` à un modèle OCR de maillot.
 
+Sous Windows, l'installation générique d'Ultralytics peut fournir un PyTorch CPU.
+Le script le détecte et le remplace par le trio officiel et appairé
+`torch 2.11.0`, `torchvision 0.26.0`, `torchaudio 2.11.0` depuis l'index CUDA 12.8,
+puis exige que `torch.cuda.is_available()` soit vrai avant de modifier `.env`.
+
 Le raccordement au roster devient automatique uniquement si les CSV des deux
 clubs contiennent des numéros réels et uniques. Une lecture ambiguë reste
 « inconnue » au lieu d'attribuer un mauvais nom.

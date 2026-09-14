@@ -17,9 +17,23 @@ if (-not (Test-Path $Python)) {
     throw "Environnement absent: lancez d'abord .\scripts\install_windows.ps1 -WithML"
 }
 
-$CudaProbe = & $Python -c "import torch; print('READY' if torch.cuda.is_available() else 'MISSING')"
-if ($LASTEXITCODE -ne 0 -or ($CudaProbe | Select-Object -Last 1) -ne "READY") {
-    throw "PyTorch ne voit pas CUDA. Corrigez l'installation PyTorch/NVIDIA avant Native GSR; le test CPU prendrait plusieurs heures."
+& $Python -c "import torch, sys; sys.exit(0 if torch.cuda.is_available() else 2)"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "PyTorch CPU detecte. Installation de la version officielle CUDA 12.8..."
+    & $Python -m pip uninstall -y torch torchvision torchaudio
+    & $Python -m pip install --no-cache-dir `
+        "torch==2.11.0" `
+        "torchvision==0.26.0" `
+        "torchaudio==2.11.0" `
+        --index-url "https://download.pytorch.org/whl/cu128"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Installation PyTorch CUDA 12.8 impossible. Le .env n'a pas ete modifie."
+    }
+}
+
+& $Python -c "import torch; assert torch.cuda.is_available(); print(torch.__version__, torch.version.cuda, torch.cuda.get_device_name(0))"
+if ($LASTEXITCODE -ne 0) {
+    throw "PyTorch CUDA est installe mais la GTX 1650 reste inaccessible. Verifiez le pilote NVIDIA puis redemarrez Windows."
 }
 
 New-Item -ItemType Directory -Path $ModelRoot -Force | Out-Null
