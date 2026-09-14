@@ -376,9 +376,13 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual([item.track_id for item in kept], ["athlete-2", "athlete-3"])
 
     def test_ball_selection_rejects_isolated_false_positive(self):
+        import numpy as np
+
         provider = YoloVisionProvider.__new__(YoloVisionProvider)
         provider.previous_ball_center = None
         provider.previous_ball_timestamp_ms = None
+        provider.ball_confidence = 0.12
+        frame = np.full((720, 1280, 3), (45, 145, 45), dtype=np.uint8)
         player = TrackedObject(
             "athlete-1", "player", (100, 100, 150, 250), 0.90
         )
@@ -388,11 +392,42 @@ class VideoSamplingTests(unittest.TestCase):
         selected = provider._select_ball(
             [isolated, near_player],
             [player],
-            (720, 1280, 3),
+            frame,
             10_000,
         )
 
         self.assertEqual(selected, near_player)
+        self.assertIn("near_player", provider.last_ball_selection_reason)
+
+    def test_ball_selection_accepts_unique_loose_ball_on_the_pitch(self):
+        import numpy as np
+
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.previous_ball_center = None
+        provider.previous_ball_timestamp_ms = None
+        provider.ball_confidence = 0.12
+        frame = np.full((720, 1280, 3), (45, 145, 45), dtype=np.uint8)
+        loose_ball = ((620, 330, 629, 339), 0.24)
+
+        selected = provider._select_ball([loose_ball], [], frame, 10_000)
+
+        self.assertEqual(selected, loose_ball)
+        self.assertEqual(provider.last_ball_selection_reason, "field_only")
+        self.assertGreater(provider.last_ball_field_support, 0.80)
+
+    def test_ball_selection_rejects_loose_candidate_away_from_pitch(self):
+        import numpy as np
+
+        provider = YoloVisionProvider.__new__(YoloVisionProvider)
+        provider.previous_ball_center = None
+        provider.previous_ball_timestamp_ms = None
+        provider.ball_confidence = 0.12
+        frame = np.zeros((720, 1280, 3), dtype=np.uint8)
+        logo_candidate = ((620, 330, 629, 339), 0.92)
+
+        selected = provider._select_ball([logo_candidate], [], frame, 10_000)
+
+        self.assertIsNone(selected)
 
     def test_ball_geometry_rejects_large_field_mark(self):
         self.assertFalse(
@@ -532,6 +567,33 @@ class VideoSamplingTests(unittest.TestCase):
         self.assertEqual(len(refined), 1)
         self.assertEqual(refined[0].confidence, 0.91)
         self.assertEqual(refiner.diagnostics()["duplicates_removed"], 1)
+
+    def test_native_gsr_rejects_tracker_id_after_strong_team_switch(self):
+        import numpy as np
+
+        refiner = NativeIdentityRefiner(home_team_cluster="A")
+        first = TrackedObject("raw-1", "player", (80, 25, 120, 150), 0.91)
+        state = refiner._new_state(first, np.asarray([1.0, 0.0]), 1_000)
+        state.team_label = "home"
+        refiner.raw_to_canonical["raw-1"] = state.canonical_id
+        refiner.team_centers = np.asarray(
+            [
+                np.zeros(8, dtype=np.float32),
+                np.ones(8, dtype=np.float32),
+            ]
+        )
+        switched = TrackedObject("raw-1", "player", (82, 25, 122, 150), 0.90)
+
+        assignments = refiner._link_candidates(
+            [switched],
+            [np.asarray([1.0, 0.0])],
+            [np.ones(8, dtype=np.float32)],
+            [None],
+            1_080,
+        )
+
+        self.assertEqual(assignments, {})
+        self.assertEqual(refiner.direct_track_rejections, 1)
 
     def test_native_gsr_stitches_a_conservative_tracker_fragment(self):
         import cv2
@@ -899,6 +961,17 @@ class VideoSamplingTests(unittest.TestCase):
 
         self.assertEqual(build_provider.call_args.args[0], "yolo")
         self.assertEqual(build_provider.call_args.kwargs["player_class_ids"], [])
+
+    def test_native_gsr_detects_hard_broadcast_cut(self):
+        import numpy as np
+
+        provider = NativeGSRVisionProvider.__new__(NativeGSRVisionProvider)
+        provider.previous_scene_gray = None
+        first = np.zeros((180, 320, 3), dtype=np.uint8)
+        second = np.full((180, 320, 3), 255, dtype=np.uint8)
+
+        self.assertFalse(provider._detect_scene_cut(first))
+        self.assertTrue(provider._detect_scene_cut(second))
 
     def test_native_gsr_retries_at_lower_resolution_after_memory_error(self):
         class MemoryLimitedBase:

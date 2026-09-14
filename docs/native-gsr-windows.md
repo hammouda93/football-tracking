@@ -7,22 +7,25 @@ le test continu de 2 min, le live, le ballon, le jeu effectif et les exports.
 ## Architecture réellement exécutée
 
 1. Le modèle football détecte ballon, gardiens, joueurs et arbitres à 1280 px.
-2. BoT-SORT associe les personnes et compense les mouvements de caméra.
-3. Un second étage supprime les doubles boîtes qui décrivent la même personne.
-4. L'apparence est agrégée sur toute la piste, jamais décidée sur une seule image.
-5. Les fragments séparés sont réunis seulement si apparence, rôle, temps et
+2. ByteTrack conserve les détections faibles ; il est retenu après le test réel où
+   BoT-SORT ne gardait que 41,7 % des détections et produisait 507,5 pistes/minute.
+3. OSNet recolle les fragments immédiats avec le mouvement, rejette les sauts
+   manifestes d’équipe et remet l’espace d’IDs à zéro aux changements de plan.
+4. Un second étage supprime les doubles boîtes qui décrivent la même personne.
+5. L'apparence est agrégée sur toute la piste, jamais décidée sur une seule image.
+6. Les fragments séparés sont réunis seulement si apparence, rôle, temps et
    déplacement sont tous compatibles. Une ambiguïté conserve deux IDs distincts.
-6. Les deux maillots sont appris par K-means sur les torses de plusieurs
+7. Les deux maillots sont appris par K-means sur les torses de plusieurs
    tracklets. Les couleurs saisies à l'import ne participent pas au calcul.
-7. La correspondance groupe A/B vers ST/CSS reste inversable dans l'interface.
-8. OSNet produit une signature d'apparence profonde et réacquiert prudemment
+8. La correspondance groupe A/B vers ST/CSS reste inversable dans l'interface.
+9. OSNet produit une signature d'apparence profonde et réacquiert prudemment
    un joueur après une coupure ; la couleur de peau n'est ni nécessaire ni
    utilisée comme identité.
-9. EasyOCR lit les numéros sur plusieurs images. Un vote pondéré au niveau de
+10. EasyOCR lit les numéros sur plusieurs images. Un vote pondéré au niveau de
    la piste rattache ensuite le numéro à l'effectif importé.
-10. Le calibrateur ONNX accepte exactement les 97 points et le schéma du modèle,
+11. Le calibrateur ONNX accepte exactement les 97 points et le schéma du modèle,
     rejette les homographies instables et remet son état à zéro au changement de plan.
-11. Une passe multi-échelle récupère périodiquement le petit ballon sans créer
+12. Une passe multi-échelle récupère périodiquement le petit ballon sans créer
     arbitrairement un ballon loin de tout joueur.
 
 Cette structure reprend les principes publiés de TrackLab/`sn-gamestate`
@@ -47,9 +50,9 @@ YOLO_MODEL_PATH=models/football-players.pt
 YOLO_CONFIDENCE=0.18
 YOLO_BALL_CONFIDENCE=0.12
 YOLO_IMAGE_SIZE=1280
-YOLO_TRACKER=botsort
+YOLO_TRACKER=bytetrack
 YOLO_TRACK_LOW_CONFIDENCE=0.05
-YOLO_NEW_TRACK_CONFIDENCE=0.20
+YOLO_NEW_TRACK_CONFIDENCE=0.18
 YOLO_TRACK_MATCH_THRESHOLD=0.80
 YOLO_TRACK_BUFFER_SECONDS=4.8
 

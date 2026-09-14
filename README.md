@@ -14,7 +14,7 @@ Plateforme locale d’analyse de matches de football à partir d’une vidéo co
 - Compensation pan/tilt/zoom par ORB, RANSAC et homographies par plan caméra.
 - Projection métrique 105 × 68 m lorsque quatre points terrain ou plus sont fournis.
 - Backend YOLO + BoT-SORT/ByteTrack local toujours disponible.
-- Profil `native_gsr` entièrement Windows : BoT-SORT, dédoublonnage des
+- Profil `native_gsr` entièrement Windows : ByteTrack, dédoublonnage des
   personnes, apparence agrégée par tracklet, liaison prudente des fragments et
   équipes apprises dans la vidéo. Il ne dépend pas de WSL.
 - Adaptateur GSR versionné pour TrackLab + `sn-gamestate` ou le moteur

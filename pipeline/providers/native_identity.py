@@ -373,12 +373,15 @@ class NativeIdentityRefiner:
         self.window_index = 0
         self.global_reacquisitions = 0
         self.roster_resolutions = 0
+        self.direct_track_rejections = 0
+        self.cross_shot_pending = False
 
-    def reset_window(self) -> None:
-        """Reset only the online tracker namespace, preserving match identities."""
+    def reset_window(self, *, scene_cut: bool = False) -> None:
+        """Reset the tracker namespace while preserving match identities."""
 
         self.raw_to_canonical = {}
         self.window_index += 1
+        self.cross_shot_pending = bool(scene_cut)
 
     @staticmethod
     def _same_role_family(first: str, second: str) -> bool:
@@ -450,6 +453,50 @@ class NativeIdentityRefiner:
         observed = "home" if int(ranked[0]) == home_index else "away"
         return observed, confidence
 
+    def _direct_track_is_consistent(
+        self,
+        state: IdentityState,
+        obj: TrackedObject,
+        feature: np.ndarray,
+        team_feature: np.ndarray | None,
+        jersey_observation: JerseyObservation | None,
+        timestamp_ms: int,
+    ) -> bool:
+        """Guard against an online tracker ID jumping to another person."""
+
+        gap_ms = timestamp_ms - state.last_timestamp_ms
+        if (
+            gap_ms <= 0
+            or gap_ms > self.max_gap_ms
+            or not self._same_role_family(state.role, obj.role)
+        ):
+            return False
+        observed_team, observed_team_confidence = self._team_from_feature(
+            team_feature
+        )
+        if (
+            state.team_label
+            and observed_team
+            and observed_team_confidence >= 0.55
+            and state.team_label != observed_team
+        ):
+            return False
+        if (
+            state.jersey_number is not None
+            and jersey_observation is not None
+            and jersey_observation.confidence >= 0.75
+            and state.jersey_number != jersey_observation.number
+        ):
+            return False
+        if self._pitch_similarity(state, obj, gap_ms) == 0.0:
+            return False
+        appearance = _cosine(state.appearance, feature)
+        motion = self._motion_similarity(state, obj, gap_ms)
+        minimum_appearance = (
+            0.30 if self.encoder.backend != "histogram" else 0.62
+        )
+        return appearance >= minimum_appearance or motion >= 0.35
+
     def _link_candidates(
         self,
         objects,
@@ -457,6 +504,8 @@ class NativeIdentityRefiner:
         team_features,
         jersey_observations,
         timestamp_ms: int,
+        *,
+        cross_shot: bool = False,
     ):
         assignments: dict[int, tuple[int, float]] = {}
         used_states: set[int] = set()
@@ -467,9 +516,20 @@ class NativeIdentityRefiner:
             raw_id = str(obj.track_id)
             known_id = self.raw_to_canonical.get(raw_id)
             if known_id in self.states:
-                assignments[index] = (known_id, 1.0)
-                used_states.add(known_id)
-                continue
+                state = self.states[known_id]
+                if self._direct_track_is_consistent(
+                    state,
+                    obj,
+                    feature,
+                    team_feature,
+                    jersey_observation,
+                    timestamp_ms,
+                ):
+                    assignments[index] = (known_id, 1.0)
+                    used_states.add(known_id)
+                    continue
+                self.raw_to_canonical.pop(raw_id, None)
+                self.direct_track_rejections += 1
             for canonical_id, state in self.states.items():
                 gap_ms = timestamp_ms - state.last_timestamp_ms
                 if gap_ms <= 0 or gap_ms > self.global_max_gap_ms:
@@ -493,24 +553,39 @@ class NativeIdentityRefiner:
                     and state.jersey_number != observed_number
                 ):
                     continue
-                short_gap = gap_ms <= self.max_gap_ms
+                short_gap = gap_ms <= self.max_gap_ms and not cross_shot
                 if short_gap:
-                    minimum_appearance = 0.72 if self.encoder.backend != "histogram" else 0.90
-                    if appearance < minimum_appearance:
-                        continue
                     motion = self._motion_similarity(state, obj, gap_ms)
                     if motion <= 0:
+                        continue
+                    immediate_fragment = gap_ms <= 600 and motion >= 0.55
+                    if self.encoder.backend != "histogram":
+                        minimum_appearance = 0.45 if immediate_fragment else 0.72
+                    else:
+                        minimum_appearance = 0.78 if immediate_fragment else 0.90
+                    if appearance < minimum_appearance:
                         continue
                     pitch = self._pitch_similarity(state, obj, gap_ms)
                     if pitch == 0.0:
                         continue
-                    if pitch is None:
+                    if immediate_fragment and pitch is None:
+                        score = 0.46 * appearance + 0.50 * motion
+                        score += 0.04 * observed_team_confidence
+                        minimum_score = (
+                            0.62 if self.encoder.backend != "histogram" else 0.80
+                        )
+                    elif pitch is None:
                         score = 0.70 * appearance + 0.26 * motion
                         score += 0.04 * observed_team_confidence
+                        minimum_score = (
+                            0.72 if self.encoder.backend != "histogram" else 0.88
+                        )
                     else:
                         score = 0.58 * appearance + 0.20 * motion
                         score += 0.14 * pitch + 0.08 * observed_team_confidence
-                    minimum_score = 0.72 if self.encoder.backend != "histogram" else 0.88
+                        minimum_score = (
+                            0.72 if self.encoder.backend != "histogram" else 0.88
+                        )
                 else:
                     # Long reacquisition is forbidden with the colour histogram
                     # fallback. It requires deep appearance plus another cue.
@@ -749,7 +824,9 @@ class NativeIdentityRefiner:
             team_features,
             jersey_observations,
             timestamp_ms,
+            cross_shot=self.cross_shot_pending,
         )
+        self.cross_shot_pending = False
         state_by_index = {}
         for index, (obj, feature, team_feature, jersey_observation) in enumerate(
             zip(people, features, team_features, jersey_observations)
@@ -823,6 +900,7 @@ class NativeIdentityRefiner:
             "fragments_stitched": self.fragments_stitched,
             "global_reacquisitions": self.global_reacquisitions,
             "duplicates_removed": self.duplicates_removed,
+            "direct_track_rejections": self.direct_track_rejections,
             "team_tracklets": sum(
                 state.mean_team_feature is not None for state in self.states.values()
             ),

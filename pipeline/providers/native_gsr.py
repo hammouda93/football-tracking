@@ -16,7 +16,7 @@ class NativeGSRVisionProvider(VisionProvider):
         robust_config.update(
             {
                 "profile": "advanced",
-                "tracker_name": "botsort",
+                "tracker_name": str(config.get("tracker_name", "bytetrack")),
                 "confidence": float(config.get("confidence", 0.18)),
                 "tracker_low_confidence": float(
                     config.get("tracker_low_confidence", 0.05)
@@ -83,14 +83,36 @@ class NativeGSRVisionProvider(VisionProvider):
             "tracker_frame_rate",
         ):
             setattr(self, attribute, getattr(self.base, attribute))
-        self.tracker_name = "botsort+native_reid"
+        self.tracker_name = f"{self.base.tracker_name}+native_reid"
         self.adaptive_resizes: list[dict[str, int]] = []
         self.off_pitch_rejections = 0
+        self.previous_scene_gray = None
+        self.scene_cut_resets = 0
 
     def reset(self) -> None:
         self.base.reset()
         self.refiner.reset_window()
         self.pitch.reset_shot()
+        self.previous_scene_gray = None
+
+    def _detect_scene_cut(self, frame) -> bool:
+        if frame is None or not hasattr(frame, "shape"):
+            return False
+        import cv2
+
+        _height, width = frame.shape[:2]
+        scale = min(1.0, 640.0 / max(width, 1))
+        working = (
+            cv2.resize(frame, None, fx=scale, fy=scale)
+            if scale < 1.0
+            else frame
+        )
+        gray = cv2.cvtColor(working, cv2.COLOR_BGR2GRAY)
+        previous = getattr(self, "previous_scene_gray", None)
+        self.previous_scene_gray = gray
+        if previous is None or previous.shape != gray.shape:
+            return False
+        return float(cv2.absdiff(gray, previous).mean() / 255.0) > 0.32
 
     @staticmethod
     def _is_memory_error(exc: RuntimeError) -> bool:
@@ -115,6 +137,12 @@ class NativeGSRVisionProvider(VisionProvider):
         return True
 
     def analyze_frame(self, frame, timestamp_ms: int) -> FrameAnalysis:
+        scene_cut = self._detect_scene_cut(frame)
+        if scene_cut:
+            self.base.reset_tracking_state()
+            self.refiner.reset_window(scene_cut=True)
+            self.pitch.reset_shot()
+            self.scene_cut_resets += 1
         while True:
             try:
                 analysis = self.base.analyze_frame(frame, timestamp_ms)
@@ -122,6 +150,7 @@ class NativeGSRVisionProvider(VisionProvider):
             except RuntimeError as exc:
                 if not self._is_memory_error(exc) or not self._reduce_image_size():
                     raise
+        analysis.scene_cut = bool(analysis.scene_cut or scene_cut)
         before = len(analysis.objects)
         pitch_engine = getattr(self, "pitch", None)
         pitch_ready = bool(
@@ -169,6 +198,9 @@ class NativeGSRVisionProvider(VisionProvider):
         analysis.diagnostics["profile"] = self.profile
         analysis.diagnostics["adaptive_image_resizes"] = list(self.adaptive_resizes)
         analysis.diagnostics["image_size"] = self.image_size
+        analysis.diagnostics["scene_cut_tracker_resets"] = int(
+            getattr(self, "scene_cut_resets", 0)
+        )
         analysis.diagnostics["native_identity"] = identity
         analysis.diagnostics["pitch_calibration"] = pitch
         analysis.diagnostics["rejected_person_detections"] = int(
@@ -183,4 +215,5 @@ class NativeGSRVisionProvider(VisionProvider):
             "pitch": self.pitch.diagnostics(),
             "ball": self.base.ball_recovery_diagnostics(),
             "off_pitch_rejections": self.off_pitch_rejections,
+            "scene_cut_tracker_resets": self.scene_cut_resets,
         }
